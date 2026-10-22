@@ -183,7 +183,24 @@ impl SearchContext {
             line,
         )
     }
+
+    /// Scans the rest of the file, so that the number of lines is known.
+    ///
+    /// The index is shared with the editor, so this fills it in for the
+    /// editor too rather than doing the work twice.
+    fn index_fully(&self) {
+        while !self.index.scan_more(&self.bytes[..], SCAN_CHUNK) {}
+    }
+
+    /// The last line of the document, once the file has been scanned.
+    fn last_line(&self) -> Option<u64> {
+        let total = self.index.total_lines()?;
+        Some(self.overlay.line_count(total).saturating_sub(1))
+    }
 }
+
+/// How much of the file one indexing step scans.
+const SCAN_CHUNK: usize = 1 << 20;
 
 /// What a scan is looking for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +214,12 @@ pub enum Scope {
     From { pos: Pos },
     /// The last match starting strictly before the position.
     Before { pos: Pos },
+    /// The last match in the document.
+    ///
+    /// Finding it means knowing where the document ends, which means the
+    /// whole file has to be indexed first. The scan does that itself, in the
+    /// background, so the editor never has to wait for it.
+    Last,
 }
 
 /// Something a scan reports.
@@ -282,6 +305,7 @@ fn scan(
             scan_forward(&context, &pattern, scope, pos, &cancel, &sender)
         }
         Scope::Before { pos } => scan_backward(&context, &pattern, pos, &cancel, &sender),
+        Scope::Last => scan_last(&context, &pattern, &cancel, &sender),
     }
 }
 
@@ -378,6 +402,45 @@ fn scan_backward(
             if line == pos.line && start >= pos.col {
                 break;
             }
+            closest = Some(MatchPos { line, start, end });
+        }
+        if let Some(found) = closest {
+            let _ = sender.send(SearchEvent::Found(found));
+            let _ = sender.send(SearchEvent::Finished { matches: 1 });
+            return;
+        }
+        if line == 0 {
+            break;
+        }
+        line -= 1;
+    }
+    let _ = sender.send(SearchEvent::Finished { matches: 0 });
+}
+
+/// Finds the last match in the document.
+fn scan_last(
+    context: &SearchContext,
+    pattern: &Pattern,
+    cancel: &AtomicBool,
+    sender: &Sender<SearchEvent>,
+) {
+    // The end of the document is only known once the whole file has been
+    // indexed, so the scan finishes the index here rather than making the
+    // editor wait for it.
+    context.index_fully();
+    let Some(mut line) = context.last_line() else {
+        let _ = sender.send(SearchEvent::Finished { matches: 0 });
+        return;
+    };
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let Some(text) = context.line_text(line) else {
+            break;
+        };
+        let mut closest: Option<MatchPos> = None;
+        for (start, end) in pattern.matches_in(&text) {
             closest = Some(MatchPos { line, start, end });
         }
         if let Some(found) = closest {
@@ -501,6 +564,32 @@ mod tests {
         let events = run(context_of(&doc), pattern("t"), Scope::All);
         // "two" and "three" contain a "t".
         assert_eq!(finished(&events), Some(2));
+    }
+
+    #[test]
+    fn a_scan_for_the_last_match_finds_the_last_one() {
+        let doc = doc_of("last.txt", b"hit\nx\nhit\n");
+        let events = run(context_of(&doc), pattern("hit"), Scope::Last);
+        let matches = found(&events);
+        assert_eq!(matches.len(), 1, "{matches:?}");
+        assert_eq!(matches[0].line, 2, "the last match in the document");
+    }
+
+    #[test]
+    fn the_last_match_on_a_line_is_the_one_found() {
+        let doc = doc_of("last-line.txt", b"hit hit\n");
+        let events = run(context_of(&doc), pattern("hit"), Scope::Last);
+        let matches = found(&events);
+        assert_eq!(matches.len(), 1, "{matches:?}");
+        assert_eq!(matches[0].start, 4, "the second one on the line");
+    }
+
+    #[test]
+    fn a_scan_for_the_last_match_of_a_file_without_one_says_so() {
+        let doc = doc_of("last-none.txt", b"one\ntwo\n");
+        let events = run(context_of(&doc), pattern("needle"), Scope::Last);
+        assert!(found(&events).is_empty());
+        assert_eq!(finished(&events), Some(0));
     }
 
     #[test]

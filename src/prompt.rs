@@ -19,6 +19,7 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Purpose {
     GoToLine,
+    Search,
     ChangedOnDisk,
 }
 
@@ -27,6 +28,7 @@ impl Purpose {
     pub fn label(self) -> &'static str {
         match self {
             Purpose::GoToLine => "Go to line: ",
+            Purpose::Search => "Find: ",
             Purpose::ChangedOnDisk => "Changed on disk",
         }
     }
@@ -49,6 +51,10 @@ pub struct Prompt {
     text: String,
     /// Caret position, counted in characters.
     cursor: usize,
+    /// A note drawn after the answer, such as the reason the answer is not
+    /// yet good enough. It sits past the caret, so typing is not disturbed
+    /// by it.
+    note: Option<String>,
 }
 
 impl Prompt {
@@ -59,7 +65,19 @@ impl Prompt {
             kind: Kind::Text,
             text: String::new(),
             cursor: 0,
+            note: None,
         }
+    }
+
+    /// A prompt that collects a line of text, starting with `text`.
+    ///
+    /// The caret sits at the end, so typing continues the answer rather than
+    /// replacing it.
+    pub fn with_text(purpose: Purpose, text: &str) -> Self {
+        let mut prompt = Self::input(purpose);
+        prompt.text = text.to_owned();
+        prompt.cursor = prompt.len();
+        prompt
     }
 
     /// A prompt that collects one of `options`, each a key and a description.
@@ -69,7 +87,21 @@ impl Prompt {
             kind: Kind::Choice(options),
             text: String::new(),
             cursor: 0,
+            note: None,
         }
+    }
+
+    /// Attaches a note to the question, or removes it.
+    ///
+    /// The note explains why the answer is not accepted yet — a pattern that
+    /// does not compile, say. It is drawn after the answer, so the caret
+    /// still sits exactly where the user is typing.
+    pub fn set_note(&mut self, note: Option<String>) {
+        self.note = note;
+    }
+
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
     }
 
     pub fn purpose(&self) -> Purpose {
@@ -168,7 +200,10 @@ impl Prompt {
     /// The line as it is drawn, without the leading space.
     fn body(&self) -> String {
         match self.kind {
-            Kind::Text => format!("{}{}", self.purpose.label(), self.text),
+            Kind::Text => match &self.note {
+                Some(note) => format!("{}{} — {note}", self.purpose.label(), self.text),
+                None => format!("{}{}", self.purpose.label(), self.text),
+            },
             Kind::Choice(options) => {
                 let listed: Vec<String> = options
                     .iter()
@@ -216,6 +251,23 @@ mod tests {
         assert_eq!(prompt.line(), " Go to line: 120");
         // one leading space + "Go to line: " (12) + three typed characters
         assert_eq!(prompt.cursor_column(), Some(16));
+    }
+
+    #[test]
+    fn a_note_is_drawn_after_the_answer() {
+        let mut prompt = Prompt::input(Purpose::Search);
+        for c in "ab".chars() {
+            prompt.insert(c);
+        }
+        prompt.set_note(Some("invalid pattern".into()));
+        assert_eq!(prompt.line(), " Find: ab — invalid pattern");
+        assert_eq!(
+            prompt.cursor_column(),
+            Some(9),
+            "the caret stays where the user is typing"
+        );
+        prompt.set_note(None);
+        assert_eq!(prompt.line(), " Find: ab");
     }
 
     #[test]

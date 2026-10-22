@@ -19,6 +19,9 @@ pub enum Command {
     Redo,
     ToggleGutter,
     GoToLine,
+    Find,
+    NextMatch,
+    PreviousMatch,
 }
 
 /// The half of a two-part sequence that says what happens to a range.
@@ -154,6 +157,9 @@ impl Sequences {
             'U' => Some(Command::Redo),
             ',' => Some(Command::ToggleGutter),
             'g' => Some(Command::GoToLine),
+            'f' => Some(Command::Find),
+            'n' => Some(Command::NextMatch),
+            'N' => Some(Command::PreviousMatch),
             _ => None,
         };
         if let Some(command) = command {
@@ -284,6 +290,19 @@ mod tests {
         assert_eq!(
             run("g"),
             Step::Action(Action::Command(Command::GoToLine))
+        );
+    }
+
+    #[test]
+    fn the_search_mnemonics_are_standalone_commands() {
+        assert_eq!(run("f"), Step::Action(Action::Command(Command::Find)));
+        assert_eq!(
+            run("n"),
+            Step::Action(Action::Command(Command::NextMatch))
+        );
+        assert_eq!(
+            run("N"),
+            Step::Action(Action::Command(Command::PreviousMatch))
         );
     }
 

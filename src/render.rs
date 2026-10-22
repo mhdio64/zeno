@@ -98,6 +98,79 @@ impl View<'_> {
         Some((from, to))
     }
 
+    /// The columns of `line` that the search pattern matches, as half-open
+    /// character ranges.
+    ///
+    /// Only the part of the line that can be seen is looked at, plus a short
+    /// look-ahead: a file with one enormous line must not cost more to draw
+    /// than a file with ten thousand short ones.
+    pub fn match_ranges(&self, line: u64, painted: usize) -> Vec<(usize, usize)> {
+        let Some(pattern) = self.state.highlight_pattern.as_ref() else {
+            return Vec::new();
+        };
+        if painted == 0 {
+            return Vec::new();
+        }
+        let Some(text) = self.doc.line_text(line) else {
+            return Vec::new();
+        };
+        let window = painted + MATCH_LOOKAHEAD;
+        let scanned: &str = match text.char_indices().nth(window) {
+            Some((byte, _)) => &text[..byte],
+            None => &text,
+        };
+        pattern
+            .find_in(scanned)
+            .into_iter()
+            .filter(|(start, _)| *start < painted)
+            .map(|(start, end)| (start, end.min(painted)))
+            .collect()
+    }
+
+    /// Paints one line, in runs of equal style.
+    ///
+    /// The line is at most one screen wide, so deciding the style of every
+    /// character and merging the runs afterwards is cheaper than working out
+    /// where the selection and the search matches intersect.
+    fn styled_spans(
+        &self,
+        text: &str,
+        base: Style,
+        selection: Option<(usize, usize)>,
+        matches: &[(usize, usize)],
+    ) -> Vec<Span<'static>> {
+        let chars: Vec<char> = text.chars().collect();
+        let mut styles = vec![base; chars.len()];
+        for (start, end) in matches {
+            for col in *start..(*end).min(chars.len()) {
+                styles[col] = match_style();
+            }
+        }
+        // The selection wins over the search match: it is what the user has
+        // just made, and one highlight is easier to read than two.
+        if let Some((from, to)) = selection {
+            for col in from..to.min(chars.len()) {
+                styles[col] = selection_style();
+            }
+        }
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut start = 0;
+        for col in 1..=chars.len() {
+            if col == chars.len() || styles[col] != styles[start] {
+                spans.push(Span::styled(
+                    chars[start..col].iter().collect::<String>(),
+                    styles[start],
+                ));
+                start = col;
+            }
+        }
+        if spans.is_empty() {
+            spans.push(Span::styled(String::new(), base));
+        }
+        spans
+    }
+
     /// Screen position of the cursor, as `(x, y)` relative to `area`.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
         let row = self.state.cursor_line.checked_sub(self.state.top_line)?;
@@ -123,6 +196,20 @@ fn cursor_line_style() -> Style {
 fn selection_style() -> Style {
     Style::default().add_modifier(Modifier::REVERSED)
 }
+
+/// The style a search match is painted in.
+///
+/// Not reverse video: the selection and the cursor line already use that,
+/// and two reverse-video ranges on one line cannot be told apart.
+fn match_style() -> Style {
+    Style::default().fg(Color::Black).bg(Color::Yellow)
+}
+
+/// How far past the right edge the search pattern is still read.
+///
+/// A match that starts just before the edge and ends past it would
+/// otherwise be missed, because the line is cut where the screen ends.
+const MATCH_LOOKAHEAD: usize = 64;
 
 impl Widget for View<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -167,26 +254,17 @@ impl Widget for View<'_> {
             } else {
                 Style::default()
             };
-            body_lines.push(Line::from(match self.selection_span(line_no) {
-                None => vec![Span::styled(clipped, base)],
-                Some((from, to)) => {
-                    let painted = clipped.chars().count();
-                    let from = from.min(painted);
-                    let to = to.min(painted);
-                    if to <= from {
-                        vec![Span::styled(clipped, base)]
-                    } else {
-                        vec![
-                            Span::styled(clipped.chars().take(from).collect::<String>(), base),
-                            Span::styled(
-                                clipped.chars().skip(from).take(to - from).collect::<String>(),
-                                selection_style(),
-                            ),
-                            Span::styled(clipped.chars().skip(to).collect::<String>(), base),
-                        ]
-                    }
-                }
-            }));
+            let painted = clipped.chars().count();
+            let selection = self
+                .selection_span(line_no)
+                .map(|(from, to)| (from.min(painted), to.min(painted)));
+            let matches = self.match_ranges(line_no, painted);
+            body_lines.push(Line::from(self.styled_spans(
+                &clipped,
+                base,
+                selection,
+                &matches,
+            )));
         }
 
         if self.state.show_line_numbers {
@@ -351,6 +429,90 @@ mod tests {
             None,
             "Shift+Down must not highlight the first character of the next line"
         );
+    }
+
+    #[test]
+    fn a_search_match_is_painted_in_the_match_style() {
+        let doc = doc_of("highlight.txt", b"alpha beta\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 1,
+            cursor_col: 0,
+            show_line_numbers: false,
+            width: 20,
+            anchor: None,
+            highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+        };
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View { doc: &doc, state: &state };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // "alpha " is six characters, so the match starts at column 6.
+        assert_eq!(buffer[(6, 0)].bg, Color::Yellow);
+        assert_eq!(buffer[(9, 0)].bg, Color::Yellow);
+        assert_eq!(
+            buffer[(5, 0)].bg,
+            Color::Reset,
+            "the text before the match is not painted"
+        );
+    }
+
+    #[test]
+    fn the_selection_wins_over_the_search_match() {
+        let doc = doc_of("highlight-selection.txt", b"alpha beta\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col: 8,
+            show_line_numbers: false,
+            width: 20,
+            anchor: Some(Pos::new(0, 6)),
+            highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+        };
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View { doc: &doc, state: &state };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(
+            buffer[(6, 0)].modifier.contains(Modifier::REVERSED),
+            "the selection is painted reversed"
+        );
+        assert_eq!(
+            buffer[(6, 0)].bg,
+            Color::Reset,
+            "and not in the match style"
+        );
+        assert_eq!(
+            buffer[(8, 0)].bg,
+            Color::Yellow,
+            "the rest of the match keeps the match style"
+        );
+    }
+
+    #[test]
+    fn a_match_past_the_right_edge_is_not_looked_for() {
+        let doc = doc_of("highlight-edge.txt", b"x\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: false,
+            width: 20,
+            anchor: None,
+            highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
+        };
+        let view = View { doc: &doc, state: &state };
+        assert!(view.match_ranges(0, 20).is_empty());
     }
 
     #[test]

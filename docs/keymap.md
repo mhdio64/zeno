@@ -88,14 +88,24 @@ chord fires and no leader sequence starts: `Ctrl+S` mid-answer does not save.
 | Keys | Command |
 | --- | --- |
 | `Ctrl+G` `Leader g` | Go to line (asks for the number) |
+| `Ctrl+F` `Leader f` | Find (asks for the pattern) |
 | `Ctrl+S` | Save; if the file changed on disk, asks `[r]eload [o]overwrite [c]cancel` |
 
 A line number past the end jumps to the last line. `Ctrl+W`, `Ctrl+K` and
 `Ctrl+E` need no prompt — they act on the range the caret is already in.
 
-There are two kinds of question: one collects text (the line number), the other
-collects one letter from a fixed set (the save decision). A choice has no caret
-and is answered with the letter itself; `Esc` abandons either kind.
+There are two kinds of question: one collects text (the line number, the
+search pattern), the other collects one letter from a fixed set (the save
+decision). A choice has no caret and is answered with the letter itself; `Esc`
+abandons either kind.
+
+Find asks for a pattern in the same prompt. The pattern is compiled as it is
+typed, so the matches in the viewport are highlighted while it is being
+written, and the prompt line says how many matches there are once the
+background scan has counted them. A pattern that does not compile says so on
+the prompt line and keeps the last pattern that did. `Enter` jumps to the
+first match at or after the caret; `Leader n` and `Leader N` cycle through
+the matches and wrap around at the ends of the file.
 
 Reloading after an external change discards the buffer's unsaved edits *and* its
 undo history, because that history describes the document that was replaced. The

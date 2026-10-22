@@ -30,6 +30,7 @@ use zeno_cli::doc::{identity_of, Doc};
 use zeno_cli::motion::{self, Motion};
 use zeno_cli::prompt::{Prompt, Purpose};
 use zeno_cli::render::{View, ViewState};
+use zeno_cli::search::{MatchPos, Pattern, Scope, SearchContext, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -133,11 +134,26 @@ fn is_leader(key: &KeyEvent) -> bool {
 }
 
 /// The prompt as a widget: the label and the text being typed.
-fn prompt_line(prompt: &Prompt) -> Paragraph<'static> {
+///
+/// A search prompt also shows how many matches the pattern has, as soon as
+/// the background scan has counted them: that is the number the user is
+/// really looking for while typing.
+fn prompt_line(prompt: &Prompt, search: Option<&Search>) -> Paragraph<'static> {
     let style = Style::default()
         .bg(Color::Rgb(28, 28, 34))
         .fg(Color::Yellow);
-    Paragraph::new(Line::from(Span::styled(prompt.line(), style))).style(style)
+    let mut spans = vec![Span::styled(prompt.line(), style)];
+    if prompt.purpose() == Purpose::Search {
+        if let Some(total) = search.and_then(|search| search.total) {
+            let count = if total == 1 {
+                "1 match".to_string()
+            } else {
+                format!("{total} matches")
+            };
+            spans.push(Span::styled(format!("  {count}"), style));
+        }
+    }
+    Paragraph::new(Line::from(spans)).style(style)
 }
 
 /// What an operator's target is called, for messages.
@@ -262,6 +278,39 @@ fn run(path: &Path, background_index: bool) -> Result<(), String> {
     editor.run()
 }
 
+/// Which end of the document to try when a search finds nothing.
+///
+/// Cycling through the matches wraps around: a search that reaches the end
+/// of the file starts again at the top, and one that reaches the top starts
+/// again at the end.
+#[derive(Debug, Clone, Copy)]
+enum Wrap {
+    Start,
+    End,
+}
+
+/// A search in progress.
+///
+/// The pattern is compiled once and used twice: the renderer matches it
+/// against the visible lines to draw the highlight, and background scans walk
+/// the document to count the matches and to find the next one.
+struct Search {
+    /// The compiled pattern.
+    pattern: Pattern,
+    /// A scan counting every match in the document.
+    count: Option<SearchJob>,
+    /// The document version the count was started against.
+    count_version: u64,
+    /// How many matches the document has, once the count scan has finished.
+    total: Option<u64>,
+    /// A scan looking for the next match.
+    job: Option<SearchJob>,
+    /// The document version the navigation scan was started against.
+    job_version: u64,
+    /// The end of the document to try if the scan finds nothing.
+    wrap: Option<Wrap>,
+}
+
 struct Editor {
     doc: Doc,
     path: PathBuf,
@@ -282,6 +331,9 @@ struct Editor {
     /// The question being asked, if any. While this is open it owns the
     /// keyboard: no chord fires and no sequence starts.
     prompt: Option<Prompt>,
+    /// The search in progress, if any. Its pattern is what the viewport
+    /// highlights.
+    search: Option<Search>,
 }
 
 impl Editor {
@@ -298,6 +350,7 @@ impl Editor {
             clipboard: String::new(),
             osc: None,
             prompt: None,
+            search: None,
         }
     }
 
@@ -403,6 +456,10 @@ impl Editor {
                 }
                 Some('d') => {
                     self.duplicate_line();
+                    return;
+                }
+                Some('f') => {
+                    self.open_find();
                     return;
                 }
                 Some('g') => {
@@ -556,6 +613,7 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let mut submit: Option<Answer> = None;
         let mut cancel = false;
+        let mut edited = false;
         {
             let Some(prompt) = self.prompt.as_mut() else {
                 return;
@@ -570,12 +628,17 @@ impl Editor {
                         submit = Some(Answer::Choice(choice));
                     }
                 }
-                KeyCode::Char(c) if !ctrl => prompt.insert(c),
+                KeyCode::Char(c) if !ctrl => {
+                    prompt.insert(c);
+                    edited = true;
+                }
                 KeyCode::Backspace => {
                     prompt.backspace();
+                    edited = true;
                 }
                 KeyCode::Delete => {
                     prompt.delete();
+                    edited = true;
                 }
                 KeyCode::Left => prompt.left(),
                 KeyCode::Right => prompt.right(),
@@ -589,6 +652,11 @@ impl Editor {
             self.prompt = None;
             self.message.clear();
             return;
+        }
+        if edited {
+            // The pattern is compiled as it is typed, so the highlight in
+            // the viewport follows the typing.
+            self.refresh_search();
         }
         if let Some(answer) = submit {
             let purpose = self.prompt.take().map(|prompt| prompt.purpose());
@@ -638,6 +706,10 @@ impl Editor {
                         self.message = format!("unexpected choice: {c}").into();
                     }
                 }
+                // A search is answered with text, never with a letter.
+                Purpose::Search => {
+                    self.message = "unexpected choice".into();
+                }
             }
             Answer::Text(text) => match purpose {
                 Purpose::GoToLine => {
@@ -648,6 +720,28 @@ impl Editor {
                     } else {
                         self.message = "not a line number".into();
                     }
+                }
+                Purpose::Search => {
+                    if text.is_empty() {
+                        self.clear_search();
+                        return;
+                    }
+                    // The pattern was compiled while it was typed, so the
+                    // search already holds it — unless it did not compile,
+                    // in which case the prompt line says why.
+                    let ready = self
+                        .search
+                        .as_ref()
+                        .is_some_and(|search| search.pattern.source() == text);
+                    if !ready {
+                        self.message = Pattern::compile(&text)
+                            .err()
+                            .unwrap_or_else(|| "invalid pattern".into());
+                        return;
+                    }
+                    self.message.clear();
+                    let scope = Scope::From { pos: self.cursor() };
+                    self.start_scan(scope, Some(Wrap::Start));
                 }
                 _ => {
                     self.message = format!("unexpected text: {text}").into();
@@ -805,6 +899,9 @@ impl Editor {
                 self.message.clear();
             }
             Command::GoToLine => self.open_prompt(Purpose::GoToLine),
+            Command::Find => self.open_find(),
+            Command::NextMatch => self.next_match(),
+            Command::PreviousMatch => self.previous_match(),
         }
     }
 
@@ -1211,6 +1308,242 @@ impl Editor {
         }
     }
 
+    // ----- searching -----------------------------------------------------
+
+    /// `Ctrl+F` and `Leader f`: ask for a pattern.
+    ///
+    /// The prompt starts with the last pattern, so a second search is a
+    /// small edit rather than a retype.
+    fn open_find(&mut self) {
+        let previous = self
+            .search
+            .as_ref()
+            .map(|search| search.pattern.source().to_owned())
+            .unwrap_or_default();
+        self.prompt = Some(Prompt::with_text(Purpose::Search, &previous));
+        self.message.clear();
+    }
+
+    /// Forgets the search and the highlight that goes with it.
+    fn clear_search(&mut self) {
+        self.search = None;
+        self.view.highlight_pattern = None;
+    }
+
+    /// Recompiles the pattern being typed.
+    ///
+    /// The compiled pattern is what the viewport highlights, so the
+    /// highlight follows the typing; the matches are counted in the
+    /// background.
+    fn refresh_search(&mut self) {
+        let Some(prompt) = self.prompt.as_ref() else {
+            return;
+        };
+        if prompt.purpose() != Purpose::Search {
+            return;
+        }
+        let source = prompt.text().to_owned();
+        let compiled = Pattern::compile(&source);
+        let note = compiled.as_ref().err().cloned();
+        if let Some(prompt) = self.prompt.as_mut() {
+            prompt.set_note(note);
+        }
+        let Ok(pattern) = compiled else {
+            // The last pattern that compiled keeps its highlight, so the
+            // user can still see what they were looking for.
+            return;
+        };
+        if source.is_empty() {
+            self.clear_search();
+            return;
+        }
+        self.set_pattern(pattern);
+        self.start_count();
+    }
+
+    /// Records the pattern the viewport highlights.
+    fn set_pattern(&mut self, pattern: Pattern) {
+        let version = self.doc.version();
+        self.view.highlight_pattern = Some(pattern.clone());
+        let search = self.search.get_or_insert_with(|| Search {
+            pattern: pattern.clone(),
+            count: None,
+            count_version: version,
+            total: None,
+            job: None,
+            job_version: version,
+            wrap: None,
+        });
+        search.pattern = pattern;
+        search.total = None;
+        search.count_version = version;
+    }
+
+    /// The document, as a background scan sees it.
+    fn search_context(&self) -> SearchContext {
+        SearchContext::new(
+            self.doc.shared_bytes(),
+            self.doc.index_handle(),
+            self.doc.overlay().clone(),
+            self.doc.line_ending(),
+        )
+    }
+
+    /// Starts a scan counting the matches in the whole document.
+    ///
+    /// The count is what tells the user whether the search found anything at
+    /// all, and it is done in the background so that a huge file never
+    /// freezes the editor.
+    fn start_count(&mut self) {
+        if self.search.is_none() {
+            return;
+        }
+        let context = self.search_context();
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if let Some(mut job) = search.count.take() {
+            job.cancel();
+        }
+        let pattern = search.pattern.clone();
+        search.count = Some(SearchJob::start(context, pattern, Scope::All));
+    }
+
+    /// Starts a scan looking for the next match.
+    ///
+    /// `wrap` says which end of the document to try if this scan finds
+    /// nothing, so that cycling through the matches wraps around.
+    fn start_scan(&mut self, scope: Scope, wrap: Option<Wrap>) {
+        if self.search.is_none() {
+            return;
+        }
+        let context = self.search_context();
+        let version = self.doc.version();
+        let Some(search) = self.search.as_mut() else {
+            return;
+        };
+        if let Some(mut job) = search.job.take() {
+            job.cancel();
+        }
+        let pattern = search.pattern.clone();
+        search.job = Some(SearchJob::start(context, pattern, scope));
+        search.job_version = version;
+        search.wrap = wrap;
+    }
+
+    /// `Leader n`: the next match after the caret.
+    fn next_match(&mut self) {
+        if self.search.is_none() {
+            // Nothing to move to yet, so ask for a pattern.
+            self.open_find();
+            return;
+        }
+        let scope = Scope::After { pos: self.cursor() };
+        self.start_scan(scope, Some(Wrap::Start));
+    }
+
+    /// `Leader N`: the previous match before the caret.
+    fn previous_match(&mut self) {
+        if self.search.is_none() {
+            self.open_find();
+            return;
+        }
+        let scope = Scope::Before { pos: self.cursor() };
+        self.start_scan(scope, Some(Wrap::End));
+    }
+
+    /// Applies whatever the background scans have reported.
+    ///
+    /// The scans run in their own threads; the editor only ever reads what
+    /// they have already finished, so a frame is never held up by a search.
+    fn poll_search(&mut self) {
+        let Some(mut search) = self.search.take() else {
+            return;
+        };
+        let version = self.doc.version();
+        // The document moved under the scans, so whatever they were counting
+        // or looking for is about a document that no longer exists.
+        let moved = search.count_version != version;
+
+        // The count.
+        let mut counted = None;
+        if let Some(job) = search.count.as_ref() {
+            for event in job.drain() {
+                if let SearchEvent::Finished { matches } = event {
+                    counted = Some(matches);
+                }
+            }
+        }
+        if let Some(total) = counted {
+            search.count = None;
+            if !moved {
+                search.total = Some(total);
+            }
+        }
+        if moved {
+            // The number is counted again against the document as it is now.
+            search.total = None;
+            search.count_version = version;
+        }
+
+        // The navigation scan.
+        let mut found = None;
+        let mut finished = false;
+        if let Some(job) = search.job.as_ref() {
+            for event in job.drain() {
+                match event {
+                    SearchEvent::Found(m) => found = Some(m),
+                    SearchEvent::Finished { .. } => finished = true,
+                    SearchEvent::Progress { .. } => {}
+                }
+            }
+        }
+        if finished {
+            search.job = None;
+        }
+
+        let wrap = if found.is_none() && finished {
+            // The scan ran out of document without finding anything, so the
+            // other end is tried next.
+            search.wrap.take()
+        } else {
+            None
+        };
+        let job_version = search.job_version;
+
+        self.search = Some(search);
+
+        if moved {
+            self.start_count();
+        }
+
+        if let Some(m) = found {
+            // A match found for a document that has since changed is a
+            // match in a document that no longer exists.
+            if job_version == version {
+                self.goto_match(m);
+                self.message.clear();
+            }
+        } else if let Some(wrap) = wrap {
+            let scope = match wrap {
+                Wrap::Start => Scope::From {
+                    pos: Pos::new(0, 0),
+                },
+                Wrap::End => Scope::Last,
+            };
+            self.start_scan(scope, None);
+        } else if finished {
+            self.message = "no match".into();
+        }
+    }
+
+    /// Moves the caret to a match and scrolls it into view.
+    fn goto_match(&mut self, m: MatchPos) {
+        self.move_to(Pos::new(m.line, m.start));
+        self.clamp_column();
+        self.ensure_cursor_visible();
+    }
+
     // ----- saving --------------------------------------------------------
 
     /// Saves, unless the file on disk is no longer the one that was mapped.
@@ -1307,6 +1640,9 @@ impl Editor {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     ) -> io::Result<()> {
+        // Whatever the background scans have finished is applied before the
+        // frame is painted, so a match that was found is shown where it is.
+        self.poll_search();
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
         let chunks = Layout::default()
@@ -1330,7 +1666,7 @@ impl Editor {
                 // The question replaces the status line, so the document area
                 // keeps its size and nothing on screen moves.
                 Some(prompt) => {
-                    f.render_widget(prompt_line(prompt), status);
+                    f.render_widget(prompt_line(prompt, self.search.as_ref()), status);
                     // A choice prompt has no caret: the answer is one letter.
                     if let Some(x) = prompt.cursor_column() {
                         f.set_cursor_position((x, status.y));
@@ -1380,6 +1716,21 @@ impl Editor {
             ));
         } else {
             spans.push(Span::raw(format!("{lines} lines")));
+        }
+        if let Some(search) = &self.search {
+            spans.push(Span::raw("  "));
+            let shown: String = search.pattern.source().chars().take(24).collect();
+            spans.push(Span::styled(
+                format!("Find: {shown}"),
+                Style::default().fg(Color::Magenta),
+            ));
+            spans.push(Span::raw("  "));
+            let count = match search.total {
+                Some(1) => "1 match".to_string(),
+                Some(total) => format!("{total} matches"),
+                None => "counting…".to_string(),
+            };
+            spans.push(Span::styled(count, Style::default().fg(Color::Yellow)));
         }
         if !self.message.is_empty() {
             spans.push(Span::raw("  "));
@@ -2254,5 +2605,183 @@ mod tests {
         sequence(&mut e, "dz");
         assert_eq!(e.message, "cancelled");
         assert_eq!(line(&e, 0), "ab", "a cancelled sequence must not edit");
+    }
+
+    // ----- searching -----------------------------------------------------
+
+    /// Waits for the background scans to report what they found.
+    fn settle(e: &mut Editor) {
+        for _ in 0..500 {
+            e.poll_search();
+            let running = e
+                .search
+                .as_ref()
+                .is_some_and(|search| search.job.is_some() || search.count.is_some());
+            if !running {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    #[test]
+    fn ctrl_f_asks_for_a_pattern() {
+        let (mut e, _p) = editor_with("find-open.txt", b"one\ntwo\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        assert!(e.prompt.is_some(), "Ctrl+F must open the prompt");
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::Search);
+        assert_eq!(prompt_text(&e).as_deref(), Some(""));
+    }
+
+    #[test]
+    fn leader_f_opens_the_same_prompt() {
+        let (mut e, _p) = editor_with("find-leader.txt", b"one\n");
+        sequence(&mut e, "f");
+        assert!(e.prompt.is_some());
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::Search);
+    }
+
+    #[test]
+    fn typing_a_pattern_highlights_the_matches_in_the_viewport() {
+        let (mut e, _p) = editor_with("find-highlight.txt", b"alpha\nbeta\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "beta");
+        let pattern = e
+            .view
+            .highlight_pattern
+            .as_ref()
+            .expect("the typed pattern is what the viewport highlights");
+        assert_eq!(pattern.source(), "beta");
+        let view = View {
+            doc: &e.doc,
+            state: &e.view,
+        };
+        assert_eq!(
+            view.match_ranges(1, 20),
+            vec![(0, 4)],
+            "the match on the second line"
+        );
+        assert!(
+            view.match_ranges(0, 20).is_empty(),
+            "there is no match on the first line"
+        );
+    }
+
+    #[test]
+    fn enter_jumps_to_the_first_match() {
+        let (mut e, _p) = editor_with("find-jump.txt", b"one\ntwo\nneedle\nthree\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "needle");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.view.cursor_col, 0);
+    }
+
+    #[test]
+    fn leader_n_walks_to_the_next_match_and_wraps_around() {
+        let (mut e, _p) = editor_with("find-next.txt", b"hit\nx\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 0, "the first match");
+        sequence(&mut e, "n");
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 2, "the next match");
+        sequence(&mut e, "n");
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 0, "the search wraps around to the top");
+    }
+
+    #[test]
+    fn leader_shift_n_walks_back_to_the_previous_match() {
+        let (mut e, _p) = editor_with("find-prev.txt", b"hit\nx\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 0);
+        sequence(&mut e, "N");
+        settle(&mut e);
+        assert_eq!(
+            e.view.cursor_line, 2,
+            "there is no match above, so the search wraps around to the last one"
+        );
+    }
+
+    #[test]
+    fn an_invalid_pattern_is_reported_and_moves_nothing() {
+        let (mut e, _p) = editor_with("find-invalid.txt", b"one\ntwo\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "a(");
+        assert!(
+            e.prompt.as_ref().unwrap().note().is_some(),
+            "the prompt says why the pattern is not good"
+        );
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.message.contains("invalid pattern"), "{}", e.message);
+        assert_eq!(e.view.cursor_line, 0, "an invalid pattern moves nothing");
+    }
+
+    #[test]
+    fn the_matches_are_counted_in_the_background() {
+        let (mut e, _p) = editor_with("find-count.txt", b"hit\nx\nhit\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(3));
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_says_so() {
+        let (mut e, _p) = editor_with("find-none.txt", b"one\ntwo\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "zzz");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.message, "no match");
+        assert_eq!(e.view.cursor_line, 0);
+    }
+
+    #[test]
+    fn a_second_search_starts_with_the_last_pattern() {
+        let (mut e, _p) = editor_with("find-again.txt", b"hit\nx\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        assert_eq!(prompt_text(&e).as_deref(), Some("hit"));
+    }
+
+    #[test]
+    fn a_count_for_a_document_that_changed_is_counted_again() {
+        let (mut e, _p) = editor_with("find-stale.txt", b"hit\nx\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(2));
+        // The document changes, so the number was about a document that no
+        // longer exists, and it is counted again.
+        e.insert_text("hit");
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(3));
+    }
+
+    #[test]
+    fn emptying_the_pattern_clears_the_highlight() {
+        let (mut e, _p) = editor_with("find-clear.txt", b"hit\nx\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        assert!(e.view.highlight_pattern.is_some());
+        for _ in 0..3 {
+            e.handle_key(key(KeyCode::Backspace));
+        }
+        assert!(
+            e.view.highlight_pattern.is_none(),
+            "an empty pattern highlights nothing"
+        );
     }
 }
