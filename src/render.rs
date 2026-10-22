@@ -27,6 +27,14 @@ pub struct ViewState {
     pub show_line_numbers: bool,
     /// Width of the viewport in columns, excluding the gutter.
     pub width: u16,
+    /// First column of text shown in the viewport.
+    ///
+    /// One offset for the whole document, the way `top_line` is one offset
+    /// for the whole document vertically: every line starts at the same
+    /// column on screen, so a column means the same thing on every line.
+    /// A line shorter than the offset is simply blank to its left, which is
+    /// what every editor with a horizontal scroll does.
+    pub left_col: usize,
     /// Where the current selection started, if there is one.
     ///
     /// A selection is one optional position, not a mode and not a second
@@ -46,6 +54,7 @@ impl Default for ViewState {
             cursor_col: 0,
             show_line_numbers: true,
             width: 80,
+            left_col: 0,
             anchor: None,
             highlight_pattern: None,
         }
@@ -99,31 +108,42 @@ impl View<'_> {
     }
 
     /// The columns of `line` that the search pattern matches, as half-open
-    /// character ranges.
+    /// character ranges *within the visible window*.
     ///
     /// Only the part of the line that can be seen is looked at, plus a short
-    /// look-ahead: a file with one enormous line must not cost more to draw
-    /// than a file with ten thousand short ones.
+    /// look-around on either side: a file with one enormous line must not
+    /// cost more to draw than a file with ten thousand short ones. A match
+    /// that starts more than `MATCH_LOOKBEHIND` characters before the left
+    /// edge is therefore not found, which is the price of that bound.
     pub fn match_ranges(&self, line: u64, painted: usize) -> Vec<(usize, usize)> {
+        let Some(text) = self.doc.line_text(line) else {
+            return Vec::new();
+        };
+        let left = self.state.left_col;
+        let behind = left.saturating_sub(MATCH_LOOKBEHIND);
+        let head = head_of(&text, behind);
+        self.match_ranges_in(head, left - behind, painted)
+    }
+
+    /// The matches in `head`, as ranges within the visible window.
+    ///
+    /// `head` is the text of the line starting `offset` characters before the
+    /// left edge, so a match that reaches into the window from the left is
+    /// still found.
+    fn match_ranges_in(&self, head: &str, offset: usize, painted: usize) -> Vec<(usize, usize)> {
         let Some(pattern) = self.state.highlight_pattern.as_ref() else {
             return Vec::new();
         };
         if painted == 0 {
             return Vec::new();
         }
-        let Some(text) = self.doc.line_text(line) else {
-            return Vec::new();
-        };
-        let window = painted + MATCH_LOOKAHEAD;
-        let scanned: &str = match text.char_indices().nth(window) {
-            Some((byte, _)) => &text[..byte],
-            None => &text,
-        };
+        let scanned = take_chars(head, offset + painted + MATCH_LOOKAHEAD);
         pattern
             .find_in(scanned)
             .into_iter()
-            .filter(|(start, _)| *start < painted)
-            .map(|(start, end)| (start, end.min(painted)))
+            .map(|(start, end)| (start.saturating_sub(offset), end.saturating_sub(offset)))
+            .filter(|(start, end)| *start < painted && *end > *start)
+            .map(|(start, end)| (start.min(painted), end.min(painted)))
             .collect()
     }
 
@@ -172,16 +192,66 @@ impl View<'_> {
     }
 
     /// Screen position of the cursor, as `(x, y)` relative to `area`.
+    ///
+    /// `None` when the cursor is not on screen: the viewport scrolls to
+    /// follow it, so this only happens in the frame between a resize and
+    /// the scroll that answers it.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
         let row = self.state.cursor_line.checked_sub(self.state.top_line)?;
         if row >= area.height as u64 {
             return None;
         }
-        let text = self.doc.line_text(self.state.cursor_line)?;
-        let col = text.chars().take(self.state.cursor_col).count();
-        let x = area.x + self.gutter_width() + col as u16;
-        let max_x = area.right().saturating_sub(1);
-        Some((x.min(max_x), area.y + row as u16))
+        let gutter = self.gutter_width();
+        let body_width = area.width.saturating_sub(gutter);
+        // `cursor_col` is the character column: the editor keeps it inside
+        // the line, and walking the line to count it again would cost a
+        // keystroke's worth of work on a line with a million characters.
+        let col = self.state.cursor_col;
+        let left = self.state.left_col;
+        if col < left || col - left >= body_width as usize {
+            return None;
+        }
+        let x = area.x + gutter + (col - left) as u16;
+        Some((x, area.y + row as u16))
+    }
+}
+
+/// The text of a line from `behind` characters before the visible window.
+///
+/// The byte length is checked first: a line that cannot reach the window
+/// costs nothing to skip, so a file of short lines costs nothing to draw
+/// even when the viewport is scrolled to the right.
+fn head_of(text: &str, behind: usize) -> &str {
+    if text.len() < behind {
+        return "";
+    }
+    skip_chars(text, behind)
+}
+
+/// The part of `text` that starts at character `col`.
+///
+/// The cost is the number of characters skipped, which is what a viewport
+/// scrolled to the right of a long line has to pay.
+fn skip_chars(text: &str, col: usize) -> &str {
+    let mut rest = text;
+    let mut left = col;
+    while left > 0 {
+        match rest.chars().next() {
+            Some(c) => {
+                rest = &rest[c.len_utf8()..];
+                left -= 1;
+            }
+            None => return "",
+        }
+    }
+    rest
+}
+
+/// The first `count` characters of `text`.
+fn take_chars(text: &str, count: usize) -> &str {
+    match text.char_indices().nth(count) {
+        Some((byte, _)) => &text[..byte],
+        None => text,
     }
 }
 
@@ -210,6 +280,13 @@ fn match_style() -> Style {
 /// A match that starts just before the edge and ends past it would
 /// otherwise be missed, because the line is cut where the screen ends.
 const MATCH_LOOKAHEAD: usize = 64;
+
+/// How far before the left edge the search pattern is still read.
+///
+/// The mirror of [`MATCH_LOOKAHEAD`]: a match that starts just before the
+/// edge and reaches into it would otherwise be missed, because the line is
+/// cut where the screen begins.
+const MATCH_LOOKBEHIND: usize = 64;
 
 impl Widget for View<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
@@ -245,7 +322,13 @@ impl Widget for View<'_> {
             // with one enormous line must not cost more to draw than a file
             // with ten thousand short ones.
             let text = self.doc.line_text(line_no).unwrap_or_default();
-            let clipped: String = text.chars().take(body_width as usize).collect();
+            let left = self.state.left_col;
+            // The head of the line reaches back before the window, so that a
+            // match crossing the left edge is still found.
+            let behind = left.saturating_sub(MATCH_LOOKBEHIND);
+            let head = head_of(&text, behind);
+            let window = skip_chars(head, left - behind);
+            let clipped: String = window.chars().take(body_width as usize).collect();
             // While a selection is showing, the cursor line loses its own
             // highlight: two reverse-video ranges on one line are impossible
             // to tell apart, and the selection is the more useful of the two.
@@ -255,10 +338,14 @@ impl Widget for View<'_> {
                 Style::default()
             };
             let painted = clipped.chars().count();
-            let selection = self
-                .selection_span(line_no)
-                .map(|(from, to)| (from.min(painted), to.min(painted)));
-            let matches = self.match_ranges(line_no, painted);
+            // The selection is named in the line's own columns; the window
+            // shows a slice of them.
+            let selection = self.selection_span(line_no).map(|(from, to)| {
+                let from = from.max(left).min(left + painted);
+                let to = to.max(left).min(left + painted);
+                (from - left, to - left)
+            });
+            let matches = self.match_ranges_in(head, left - behind, painted);
             body_lines.push(Line::from(self.styled_spans(
                 &clipped,
                 base,
@@ -332,6 +419,7 @@ mod tests {
             cursor_col: 0,
             show_line_numbers: true,
             width: 20,
+            left_col: 0,
             anchor: None,
             highlight_pattern: None,
         };
@@ -349,6 +437,7 @@ mod tests {
             cursor_col: 0,
             show_line_numbers: true,
             width: 20,
+            left_col: 0,
             anchor: None,
             highlight_pattern: None,
         };
@@ -366,6 +455,7 @@ mod tests {
             cursor_col: 4,
             show_line_numbers: true,
             width: 20,
+            left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
@@ -401,6 +491,7 @@ mod tests {
             cursor_col: 2,
             show_line_numbers: false,
             width: 20,
+            left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
@@ -419,6 +510,7 @@ mod tests {
             cursor_col: 0,
             show_line_numbers: false,
             width: 20,
+            left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
@@ -440,6 +532,7 @@ mod tests {
             cursor_col: 0,
             show_line_numbers: false,
             width: 20,
+            left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
         };
@@ -471,6 +564,7 @@ mod tests {
             cursor_col: 8,
             show_line_numbers: false,
             width: 20,
+            left_col: 0,
             anchor: Some(Pos::new(0, 6)),
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
         };
@@ -508,6 +602,7 @@ mod tests {
             cursor_col: 0,
             show_line_numbers: false,
             width: 20,
+            left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
         };
@@ -524,6 +619,7 @@ mod tests {
             cursor_col: 2,
             show_line_numbers: true,
             width: 20,
+            left_col: 0,
             anchor: None,
             highlight_pattern: None,
         };
@@ -533,5 +629,108 @@ mod tests {
         assert_eq!(y, 1);
         // gutter (4 columns) + 2 characters into "beta"
         assert_eq!(x, 4 + 2);
+    }
+
+    /// A state with the window scrolled to `left_col`.
+    fn scrolled(left_col: usize, cursor_col: usize) -> ViewState {
+        ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col,
+            show_line_numbers: true,
+            width: 20,
+            left_col,
+            anchor: None,
+            highlight_pattern: None,
+        }
+    }
+
+    #[test]
+    fn a_long_line_shows_the_columns_the_window_is_scrolled_to() {
+        let doc = doc_of("long.txt", b"abcdefghijklmnopqrstuvwxyz0123456789\n");
+        let state = scrolled(10, 0);
+        let text = frame_text(&doc, &state, 24, 2);
+        assert!(text.contains("klmnopqrstuvwxyz"), "{text}");
+        assert!(!text.contains("abcdefghij"), "{text}");
+    }
+
+    #[test]
+    fn a_line_shorter_than_the_window_is_blank() {
+        let doc = doc_of("short.txt", b"abc\n");
+        let state = scrolled(10, 0);
+        let text = frame_text(&doc, &state, 24, 2);
+        assert!(!text.contains("abc"), "{text}");
+    }
+
+    #[test]
+    fn the_selection_is_painted_where_the_window_shows_it() {
+        let doc = doc_of("scroll-selection.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+        let mut state = scrolled(10, 18);
+        state.anchor = Some(Pos::new(0, 12));
+        let backend = TestBackend::new(24, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View { doc: &doc, state: &state };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let reversed = |x: u16| {
+            buffer[(4 + x, 0)]
+                .modifier
+                .contains(Modifier::REVERSED)
+        };
+        // The selection runs from column 12 to 18, and the window starts at
+        // column 10, so it is painted five columns further right.
+        assert!(!reversed(0), "column 10 is outside the selection");
+        assert!(reversed(2) && reversed(7), "columns 12 to 18 are selected");
+        assert!(!reversed(8), "column 18 is the cursor and is not painted");
+    }
+
+    #[test]
+    fn a_match_that_reaches_into_the_window_from_the_left_is_found() {
+        let doc = doc_of("scroll-match.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+        let mut state = scrolled(12, 0);
+        state.highlight_pattern = Some(Pattern::compile("klm").expect("a valid pattern"));
+        let view = View { doc: &doc, state: &state };
+        // "klm" sits at columns 10 to 13 and the window starts at 12, so
+        // only its last character is on screen.
+        assert_eq!(view.match_ranges(0, 20), vec![(0, 1)]);
+    }
+
+    #[test]
+    fn a_match_far_behind_the_left_edge_is_not_found() {
+        let mut line = String::from("needle");
+        line.push_str(&"x".repeat(200));
+        let doc = doc_of("scroll-far.txt", format!("{line}\n").as_bytes());
+        let mut state = scrolled(100, 0);
+        state.highlight_pattern = Some(Pattern::compile("needle").expect("a valid pattern"));
+        let view = View { doc: &doc, state: &state };
+        assert!(
+            view.match_ranges(0, 20).is_empty(),
+            "the match is further behind the edge than the scan looks"
+        );
+    }
+
+    #[test]
+    fn the_cursor_sits_at_its_own_column() {
+        let doc = doc_of("cursor-scroll.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+        let state = scrolled(10, 15);
+        let view = View { doc: &doc, state: &state };
+        let area = Rect::new(0, 0, 24, 2);
+        let (x, y) = view.cursor_position(area).unwrap();
+        assert_eq!(y, 0);
+        // gutter (4 columns) + 5 columns into the window
+        assert_eq!(x, 4 + 5);
+    }
+
+    #[test]
+    fn a_cursor_outside_the_window_is_not_drawn() {
+        let doc = doc_of("cursor-off.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+        let state = scrolled(10, 3);
+        let view = View { doc: &doc, state: &state };
+        let area = Rect::new(0, 0, 24, 2);
+        assert!(view.cursor_position(area).is_none());
     }
 }

@@ -72,6 +72,19 @@ explanation, because a range that wide is quadratic in the current line model
 (ADR 0012, [performance.md](./performance.md)). Selecting it is fine; editing it
 is not, until the model changes.
 
+## Long lines
+
+A line longer than the screen is scrolled, not cut. The viewport keeps one
+horizontal offset for the whole document, the way it keeps one line offset
+vertically, and it scrolls by the smallest amount that keeps the cursor on
+screen. The cursor is therefore always at its own column and the text under
+it is always readable, even on a line ten screens wide (ADR 0017).
+
+A line shorter than the offset is blank to the left of the window: its text is
+to the left of what is showing. `Home` brings the viewport back to the first
+column. The status line counts columns from the start of the line, not from
+the edge of the screen.
+
 ## The prompt line
 
 Commands that need an argument ask for it in the message line, so the document

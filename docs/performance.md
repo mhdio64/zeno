@@ -232,6 +232,12 @@ These are gaps, not passes:
 - **Memory.** Peak RSS while editing a 1 GiB file was not measured. Mapping
   the file means the resident set grows with the pages the user actually
   touches, but the number was not taken.
+- **A scrolled viewport.** Every frame above is a viewport at column zero. A
+  viewport scrolled to the right has to walk to the column it starts at, once
+  per visible line, and a line too short to reach that column is skipped
+  without being read — so a file of short lines costs nothing to draw however
+  far the viewport is scrolled. The benchmark does not scroll, so the cost of
+  a scrolled frame on a file of long lines is unmeasured.
 
 ## Reproducing
 

@@ -1306,6 +1306,18 @@ impl Editor {
         } else if self.view.cursor_line >= self.view.top_line + height {
             self.view.top_line = self.view.cursor_line + 1 - height;
         }
+        // The same sideways. A line longer than the screen scrolls under the
+        // cursor, so the cursor is never stuck against the edge of it.
+        let width = self.view.width as usize;
+        if width == 0 {
+            return;
+        }
+        let col = self.view.cursor_col;
+        if col < self.view.left_col {
+            self.view.left_col = col;
+        } else if col - self.view.left_col >= width {
+            self.view.left_col = col + 1 - width;
+        }
     }
 
     // ----- searching -----------------------------------------------------
@@ -1653,7 +1665,17 @@ impl Editor {
         let status = chunks[1];
 
         self.viewport_height_hint = body.height;
-        self.view.width = body.width;
+        // The width the editor scrolls by is the width of the *text*, not the
+        // width of the screen: the gutter takes some of it.
+        let gutter = View {
+            doc: &self.doc,
+            state: &self.view,
+        }
+        .gutter_width();
+        self.view.width = body.width.saturating_sub(gutter);
+        // The window may have changed shape since the last move, so the
+        // cursor is brought back into view before anything is painted.
+        self.ensure_cursor_visible();
 
         terminal.draw(|f| {
             let view = View {
@@ -2783,5 +2805,46 @@ mod tests {
             e.view.highlight_pattern.is_none(),
             "an empty pattern highlights nothing"
         );
+    }
+
+    #[test]
+    fn the_viewport_scrolls_sideways_to_follow_the_cursor() {
+        let (mut e, _p) = editor_with("scroll-x.txt", b"0123456789abcdefghij\n");
+        e.view.width = 10;
+        for _ in 0..10 {
+            e.handle_key(key(KeyCode::Right));
+        }
+        assert_eq!(e.view.cursor_col, 10);
+        assert_eq!(e.view.left_col, 1, "the window scrolls to keep the cursor in it");
+        e.handle_key(key(KeyCode::Right));
+        assert_eq!(e.view.cursor_col, 11);
+        assert_eq!(e.view.left_col, 2);
+    }
+
+    #[test]
+    fn moving_back_scrolls_the_window_back() {
+        let (mut e, _p) = editor_with("scroll-back.txt", b"0123456789abcdefghij\n");
+        e.view.width = 10;
+        for _ in 0..12 {
+            e.handle_key(key(KeyCode::Right));
+        }
+        assert_eq!(e.view.left_col, 3);
+        for _ in 0..12 {
+            e.handle_key(key(KeyCode::Left));
+        }
+        assert_eq!(e.view.cursor_col, 0);
+        assert_eq!(e.view.left_col, 0, "the window scrolls back to the first column");
+    }
+
+    #[test]
+    fn end_scrolls_the_window_to_the_end_of_the_line() {
+        let (mut e, _p) = editor_with("scroll-end.txt", b"0123456789abcdefghij\n");
+        e.view.width = 10;
+        e.handle_key(key(KeyCode::End));
+        assert_eq!(e.view.cursor_col, 20);
+        assert_eq!(e.view.left_col, 11);
+        e.handle_key(key(KeyCode::Home));
+        assert_eq!(e.view.cursor_col, 0);
+        assert_eq!(e.view.left_col, 0);
     }
 }
