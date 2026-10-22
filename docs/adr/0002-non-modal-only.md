@@ -1,0 +1,3 @@
+# Non-modal editing, with no vim mode
+
+The editor will never be modal: there is no normal/insert/visual distinction, and no mode to toggle into, under any key binding. People who are comfortable with vim already have vim; the people for whom vim is a barrier are better served by nano's directness than by a second way to become confused. Vim's editing power will instead be delivered as a rich set of non-modal commands — motions and text objects — so that power does not depend on a mode. This forecloses the most common feature request for terminal editors, so it is recorded here to stop it being re-proposed.

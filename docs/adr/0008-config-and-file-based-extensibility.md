@@ -1,0 +1,3 @@
+# Configuration is a TOML file, and extensibility is files on disk rather than a plugin system
+
+zeno has no plugin system. Instead a single `zeno.toml` holds key bindings and settings, and the same directory holds `syntaxes/` and `themes/`, from which extra `.sublime-syntax` files and themes are loaded at startup. A plugin system would have been the general answer to extensibility, but it would have brought a runtime, a sandboxing story and a versioning protocol into a program whose premise is starting in milliseconds; files on disk give the same practical result — adding a language or a theme — at a fraction of the cost.

@@ -604,20 +604,56 @@ impl Editor {
     }
 
     /// Acts on the answer to a prompt.
-        if start == cursor {
-            self.message = "nothing to delete".into();
-            return;
+    fn answer(&mut self, purpose: Purpose, answer: Answer) {
+        match answer {
+            Answer::Choice(c) => match purpose {
+                Purpose::GoToLine => {
+                    if let Ok(line) = c.to_string().parse::<u64>() {
+                        let last = self.doc.line_count().saturating_sub(1);
+                        self.goto(line.min(last));
+                    } else {
+                        self.message = "not a line number".into();
+                    }
+                }
+                Purpose::ChangedOnDisk => match c {
+                    'y' => {
+                        self.save();
+                    }
+                    'n' => {
+                        self.quit = true;
+                        self.message = "not saved".into();
+                    }
+                    'r' => {
+                        self.reload();
+                    }
+                    'o' => {
+                        // overwrite: save the editor's version to disk
+                        self.write_now();
+                    }
+                    'c' => {
+                        // cancel: do nothing, keep unsaved changes
+                        self.message = "not saved".into();
+                    }
+                    _ => {
+                        self.message = format!("unexpected choice: {c}").into();
+                    }
+                }
+            }
+            Answer::Text(text) => match purpose {
+                Purpose::GoToLine => {
+                    if let Ok(line) = text.parse::<u64>() {
+                        // Line numbers in prompts are 1-indexed (human-friendly)
+                        let last = self.doc.line_count().saturating_sub(1);
+                        self.goto(line.saturating_sub(1).min(last));
+                    } else {
+                        self.message = "not a line number".into();
+                    }
+                }
+                _ => {
+                    self.message = format!("unexpected text: {text}").into();
+                }
+            }
         }
-        if !self.range_is_affordable(start, cursor) {
-            self.message = self.too_large(start, cursor);
-            return;
-        }
-        self.doc.edit(start, cursor, "");
-        self.clear_selection();
-        self.move_to(start);
-        self.ensure_cursor_visible();
-        self.dirty = true;
-        self.message.clear();
     }
 
     /// `Ctrl+K`: delete from the caret to the end of the line.
@@ -629,6 +665,51 @@ impl Editor {
             return;
         }
         self.doc.edit(cursor, end, "");
+        self.clear_selection();
+        self.dirty = true;
+        self.message.clear();
+    }
+
+    /// `Ctrl+W`: delete the word before the cursor.
+    fn delete_word_before(&mut self) {
+        let cursor = self.cursor();
+        let line = self.line_text(cursor.line);
+        let col = cursor.col;
+        if col == 0 {
+            self.message = "nothing to delete".into();
+            return;
+        }
+        let text = line.as_str();
+        // Find the start of the word by going backwards from the cursor
+        let mut char_idx = col;
+        // Go backwards past word characters (alphanumeric)
+        while char_idx > 0 {
+            let c = text[char_idx - 1..char_idx].chars().next().unwrap_or(' ');
+            if !c.is_alphanumeric() {
+                break;
+            }
+            char_idx -= 1;
+        }
+        // Skip past any whitespace before the word
+        while char_idx > 0 {
+            let c = text[char_idx - 1..char_idx].chars().next().unwrap_or(' ');
+            if c.is_whitespace() {
+                break;
+            }
+            char_idx -= 1;
+        }
+        // char_idx now points to the first character of the word (or 0)
+        // Delete from char_idx to cursor position
+        let start = Pos::new(cursor.line, char_idx);
+        let end = cursor;
+        if start >= end {
+            self.message = "nothing to delete".into();
+            return;
+        }
+        let new_cursor = self.doc.edit(start, end, "");
+        // Update cursor position from the edit result
+        self.view.cursor_line = new_cursor.line;
+        self.view.cursor_col = new_cursor.col;
         self.clear_selection();
         self.dirty = true;
         self.message.clear();

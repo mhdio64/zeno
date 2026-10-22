@@ -1,0 +1,3 @@
+# syntect for syntax highlighting, not tree-sitter
+
+Highlighting uses syntect's bundled Sublime syntax definitions rather than tree-sitter grammars. syntect's syntax set is roughly 200KB of serialized data covering a few hundred languages, is line-oriented, and loads in tens of milliseconds; tree-sitter would make every shipped grammar a permanent binary-size cost, and there are reproducible reports of multi-second highlighting latency on files above 100MB. We accept less accurate highlighting — notably in pathological embedded-language cases — in exchange for breadth and latency. tree-sitter stays reachable later, for structural features or for languages that genuinely need a real parse tree.

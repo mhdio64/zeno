@@ -1,0 +1,11 @@
+# The prompt owns the keyboard
+
+Commands that need an argument had nowhere to put it. Six bindings in the keymap — `Ctrl+F`, `Ctrl+H`, `Ctrl+G`, `Leader g`, the palette, save-as — all need the user to type something, and the editor had no input surface at all: the message line could display a string and nothing more. The prompt is that surface, and it lives in the message line so a question never changes the size of the document area or moves the text under the user's eyes.
+
+The decision that matters is precedence. Three things can now claim a keystroke: the prompt, a pending leader sequence, and the document (with its chords). The order is **prompt, then leader, then document**. While a question is open, every printable key is text, `Enter` answers, `Esc` abandons, and chords are inert — `Ctrl+S` in the middle of typing a line number does not save, and `Ctrl+Space` does not open a sequence. The alternative, letting chords through, sounds harmless until a user's muscle memory saves the file halfway through an answer, or a two-key sequence swallows a digit they meant to type. A question is a small modal moment in the sense that matters — it owns the keyboard — and the way out is one key, always visible.
+
+The prompt is also why `Leader g` and `Ctrl+G` share one implementation. The sequence asks the same question the chord does and the answer goes through the same function, which is the pattern every later command with an argument will follow: the binding decides *which question*, the prompt collects it, one function interprets it. `Ctrl+F` will not need its own input handling, only its own purpose and its own answer.
+
+Go-to-line itself is deliberately lazy. Asking for line 500,000 reads that line, which extends the background index exactly that far; only a line past the end pays for a full scan, because only then does the real line count matter. Jumping is a question about one position, and answering it should not cost the whole file.
+
+Three chords came along because the pieces already existed and no prompt was needed: `Ctrl+W` deletes the range from the caret back to the previous word's start, `Ctrl+K` deletes to the end of the line, `Ctrl+E` moves to the end. Each is a motion plus the existing span edit, so each is one undo step and none of them touched the document model.

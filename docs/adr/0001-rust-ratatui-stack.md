@@ -1,0 +1,3 @@
+# Rust with ratatui, crossterm, ropey and syntect
+
+The editor is written in Rust, on top of ratatui for rendering, crossterm for terminal input/output, ropey for the text buffer and syntect for syntax highlighting. Rust was chosen because the product's core promise is a single small native binary per operating system that starts in milliseconds; C with ncurses would have been lighter still but much slower to build safely, and Go with tcell would have cost startup time and binary weight. The cost of this choice is that crossterm's keyboard-enhancement support is weaker on Windows, which is why the default bindings are designed around two-key chords (see ADR 0005).

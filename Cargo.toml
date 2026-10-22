@@ -1,0 +1,24 @@
+[package]
+name = "zeno-cli"
+version = "0.1.0"
+edition = "2024"
+description = "A fast, non-modal terminal text editor"
+license = "MIT"
+repository = "https://github.com/zeno-editor/zeno"
+keywords = ["editor", "terminal", "tui", "cli"]
+categories = ["command-line-utilities", "text-editors"]
+
+[[bin]]
+name = "zeno"
+path = "src/main.rs"
+
+[[bin]]
+name = "zeno-bench"
+path = "src/bin/zeno-bench.rs"
+
+[dependencies]
+crossterm = "0.29.0"
+memchr = "2.8.3"
+memmap2 = "0.9.11"
+ratatui = "0.30.2"
+regex = "1.13.1"

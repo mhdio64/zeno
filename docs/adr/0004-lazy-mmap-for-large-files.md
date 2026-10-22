@@ -1,0 +1,3 @@
+# The file is mapped and indexed lazily, not loaded into memory
+
+A file is memory-mapped and read as needed; line offsets are discovered progressively in the background rather than by scanning the whole file before the first frame. Loading a file into a rope up front is simpler and would satisfy files up to roughly 100MB, but the editor promises to open files of a gigabyte or more without degradation, and an eager scan makes time-to-first-frame proportional to file size. The cost is that features needing whole-file knowledge — an exact line count, a jump to line N — are unavailable or approximate until indexing completes, and edits must be kept as an overlay over the mapped original rather than written into it.

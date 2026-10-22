@@ -1,0 +1,3 @@
+# Default bindings avoid `Ctrl+Shift+<letter>` so they behave the same on every platform
+
+No default binding relies on distinguishing `Ctrl+Shift+<letter>` from `Ctrl+<letter>`. Legacy terminal input encodes both as the same control byte, and crossterm reaches Windows through the Win32 console API rather than ANSI sequences, so the Kitty keyboard protocol — the only reliable way to tell them apart — is unavailable there. Designing the binding set around chords that survive legacy encoding keeps behaviour identical across Linux, macOS and Windows instead of shipping a binding set that silently differs per platform. The cost is that some VSCode habits map to a different chord here, and the editor must advertise the active chord in the status line.
