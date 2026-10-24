@@ -192,6 +192,18 @@ impl Doc {
         self.version
     }
 
+    /// The lowest current line written since `version`.
+    ///
+    /// Everything above it is the text as it stood at `version`. A worker
+    /// holding answers computed at that version — the colour of a line, the
+    /// parser's state at a line — can keep the half of its work that is
+    /// above this line and drop the rest, which is what stops a keystroke
+    /// from blanking the whole screen. Asked about the whole file
+    /// (`version` 0), it is the lowest line that was ever edited.
+    pub fn first_changed_line_since(&self, version: u64) -> Option<u64> {
+        self.overlay.first_changed_line_since(version)
+    }
+
     /// What the file looked like when it was opened, or last saved.
     pub fn identity(&self) -> FileIdentity {
         self.identity
@@ -301,18 +313,16 @@ impl Doc {
 
     /// The text of a current line, without its trailing newline.
     pub fn line_text(&self, line: u64) -> Option<Cow<'_, str>> {
-        line_text_in(
-            &self.overlay,
-            &self.index,
-            self.bytes(),
-            self.ending,
-            line,
-        )
+        line_text_in(&self.overlay, &self.index, self.bytes(), self.ending, line)
     }
 
     /// The text between two positions, with lines joined by newlines.
     pub fn text_in_range(&self, start: Pos, end: Pos) -> String {
-        let (start, end) = if end < start { (end, start) } else { (start, end) };
+        let (start, end) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
         if start.line == end.line {
             let text = self.line_text(start.line).unwrap_or_default();
             let from = col_to_byte(&text, start.col);
@@ -340,14 +350,22 @@ impl Doc {
     /// — is a range replaced by a string, which is what makes one undo journal
     /// enough to reverse all of them.
     pub fn edit(&mut self, start: Pos, end: Pos, text: &str) -> Pos {
-        let (start, end) = if end < start { (end, start) } else { (start, end) };
+        let (start, end) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
         // Both ends must be bounded by the same document. Reading a line can
         // extend the index, so clamping them one after the other would let the
         // second bound be larger than the first.
         let last_line = self.line_count().saturating_sub(1);
         let start = self.clamp(start, last_line);
         let end = self.clamp(end, last_line);
-        let (start, end) = if end < start { (end, start) } else { (start, end) };
+        let (start, end) = if end < start {
+            (end, start)
+        } else {
+            (start, end)
+        };
         let (removed, inserted_end) = self.apply(start, end, text);
         self.history.record(Edit {
             start,
@@ -398,6 +416,10 @@ impl Doc {
     /// Returns the removed text and the end of the inserted text.
     fn apply(&mut self, start: Pos, end: Pos, text: &str) -> (String, Pos) {
         self.version += 1;
+        // Everything written below is stamped with this version, so that
+        // `first_changed_line_since` can later be asked what an answer
+        // computed at the old version is still worth.
+        self.overlay.set_version(self.version);
         let removed = self.text_in_range(start, end);
         let swallowed = end.line - start.line;
 
@@ -444,6 +466,86 @@ impl Doc {
     pub fn looks_binary(&self, probe: usize) -> bool {
         let end = probe.min(self.bytes().len());
         self.bytes()[..end].contains(&0)
+    }
+
+    /// The document, as a background worker sees it.
+    ///
+    /// The bytes and the line index are shared, so the worker reads exactly
+    /// the text the user is looking at. The overlay is copied, so the worker
+    /// reads the document as it was when the snapshot was taken — a result
+    /// that arrives after the document has moved on is discarded rather than
+    /// believed.
+    pub fn snapshot(&self) -> Snapshot {
+        Snapshot {
+            bytes: Arc::clone(&self.mmap),
+            index: Arc::clone(&self.index),
+            overlay: self.overlay.clone(),
+            ending: self.ending,
+        }
+    }
+}
+
+/// A copy of the document, for a worker to read.
+///
+/// The copy is of the *edits*, not of the text: the file's bytes are mapped
+/// and shared, and the line index is shared too, so taking a snapshot costs
+/// as much as the edits so far and no more. That is what lets the editor
+/// hand the same kind of snapshot to the search and to the highlighter
+/// without either of them owning a copy of the file.
+#[derive(Clone)]
+pub struct Snapshot {
+    bytes: Arc<Mmap>,
+    index: Arc<LineIndex>,
+    overlay: Overlay,
+    ending: LineEnding,
+}
+
+/// How much of the file one background indexing step scans.
+///
+/// Larger than the foreground's, because the background has no frame to
+/// finish: it would rather do the work in fewer, bigger steps.
+const BACKGROUND_SCAN_CHUNK: usize = 1 << 20;
+
+impl Snapshot {
+    pub fn new(
+        bytes: Arc<Mmap>,
+        index: Arc<LineIndex>,
+        overlay: Overlay,
+        ending: LineEnding,
+    ) -> Self {
+        Self {
+            bytes,
+            index,
+            overlay,
+            ending,
+        }
+    }
+
+    /// The text of a current line, as the editor would show it.
+    pub fn line_text(&self, line: u64) -> Option<Cow<'_, str>> {
+        line_text_in(&self.overlay, &self.index, &self.bytes, self.ending, line)
+    }
+
+    /// The lowest line written since `version`.
+    ///
+    /// Everything above it is the text as it was at `version`, which is
+    /// what lets a worker keep the half of its work that is still true.
+    pub fn first_changed_line_since(&self, version: u64) -> Option<u64> {
+        self.overlay.first_changed_line_since(version)
+    }
+
+    /// Scans the rest of the file, so that the number of lines is known.
+    ///
+    /// The index is shared with the editor, so this fills it in for the
+    /// editor too rather than doing the work twice.
+    pub fn index_fully(&self) {
+        while !self.index.scan_more(&self.bytes[..], BACKGROUND_SCAN_CHUNK) {}
+    }
+
+    /// The last line of the document, once the file has been scanned.
+    pub fn last_line(&self) -> Option<u64> {
+        let total = self.index.total_lines()?;
+        Some(self.overlay.line_count(total).saturating_sub(1))
     }
 }
 
@@ -582,8 +684,14 @@ mod tests {
             doc.index_fully();
             doc
         };
-        assert_eq!(doc.text_in_range(Pos::new(0, 1), Pos::new(2, 2)), "bc\ndef\ngh");
-        assert_eq!(doc.text_in_range(Pos::new(2, 2), Pos::new(0, 1)), "bc\ndef\ngh");
+        assert_eq!(
+            doc.text_in_range(Pos::new(0, 1), Pos::new(2, 2)),
+            "bc\ndef\ngh"
+        );
+        assert_eq!(
+            doc.text_in_range(Pos::new(2, 2), Pos::new(0, 1)),
+            "bc\ndef\ngh"
+        );
         assert_eq!(doc.text_in_range(Pos::new(1, 0), Pos::new(1, 0)), "");
     }
 

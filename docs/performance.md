@@ -200,13 +200,72 @@ range: the cursor-moving command and `Leader d w` share one function, and the
 delete it performs is the same span edit that undo already reverses. Measured
 end to end, `Leader d w` on ordinary text is one 0.1 ms edit.
 
+## Finding 11 — colouring the viewport costs the distance to a checkpoint, and one bug made it the file
+
+Syntect is now in the prototype (`src/highlight.rs`), so the "syntax
+highlighting" gap below is closed: the harness probes it on a generated
+48,000-line Rust file, measuring what the worker pays and what the editor
+pays to ask.
+
+| step | ms |
+| --- | --- |
+| syntax set + theme load (worker startup) | 1.1 |
+| first window, top of file (includes that load) | 26.4 |
+| window 47 900 lines down, first visit (walks from the top) | 1887.2 |
+| the next window (resumes from a checkpoint) | 2.5 |
+| that window again after one edit on line 1 | 1866.6 |
+| the same window once more (reusing the checkpoints just built) | 2.2 |
+| editor: ask on a clean document | 0.0 |
+| editor: edit + ask, 5000 edited lines | 0.3 |
+
+The two ~1.9-second rows are the honest cost of walking a TextMate parser
+over 48,000 lines of a file nobody has coloured yet — and, after an edit
+on line 1, of walking it again, because the state at line 47,900 genuinely
+depends on the line that changed. The design is vindicated by the rows
+around them: a window near the bottom of the file costs **2.5 ms** once
+anything has been walked, because a checkpoint of the parser's state sits
+no further than 512 lines away, and the editor's own cost to ask is
+nothing measurable, because it asks and paints plain text rather than
+waiting.
+
+**The benchmark found the bug that would have made all of that a lie.**
+In the first version of the probe, "the same window once more" took
+2773 ms against 2804 ms for the walk it was supposed to skip: the
+checkpoints the walk had *just* built were being discarded again on the
+very next request, for ever, because invalidation asked the wrong
+question. "What is the lowest line ever edited?" has an answer that,
+once the file has been touched, never changes — so one keystroke near the
+top of a large file threw away every checkpoint, on every request, for the
+rest of the session: rebuild, discard, re-walk. The right question is per
+checkpoint: *has anything above this line been written since the version
+it was built at?* — answerable because every overlay segment remembers
+the version that wrote it (ADR 0018). After the fix the same row is
+**2.2 ms**, and the harness fails the run if it ever becomes a walk again.
+
+The same rule guards the editor's own colour cache: only the lines from
+the edit down are forgotten. Before the fix, one edit near the top meant
+every later keystroke blanked the colours of the whole viewport while the
+worker re-walked the file.
+
+The probe itself had to be fixed before its numbers were worth anything:
+it used to stop waiting as soon as the window's *first* line was
+coloured, so a window overlapping the one already in hand reported the
+earlier walk's cost as its own — two rows read 0.0 ms while asking the
+worker nothing at all. It now waits for every line of the window.
+
+Two correctness bugs were also fixed on the way here, neither of them a
+performance bug but both found while measuring — like the CRLF one above:
+
+- the syntax set was loaded from the *newlines* dump while `line_text`
+  hands the parser lines with no newline; in 7 of 29 languages a comment
+  then never closes and every line below it renders comment-grey;
+- a cancelled request answered with an empty result, wiping the colours
+  that were on screen instead of leaving them alone.
+
 ## What was not measured
 
 These are gaps, not passes:
 
-- **Syntax highlighting.** syntect is not in the prototype at all. The spec
-  claims highlighting runs in the background and is cancelable; nothing here
-  tests that.
 - **Damage-based rendering.** The prototype repaints the whole viewport. The
   spec claims only changed cells are written. Damage tracking is unmeasured.
 - **The terminal write itself.** The benchmark renders into an off-screen
@@ -243,7 +302,7 @@ These are gaps, not passes:
 
 ```
 cargo build --release
-cargo test                      # 146 tests
+cargo test                      # 209 tests
 ./target/release/zeno-bench --sizes 1mb,100mb,1024mb --frames 200
 ```
 

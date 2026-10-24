@@ -29,8 +29,9 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::widgets::Widget;
 
-use zeno_cli::doc::edit::Pos;
 use zeno_cli::doc::Doc;
+use zeno_cli::doc::edit::Pos;
+use zeno_cli::highlight::Highlighter;
 use zeno_cli::motion::{self, Motion};
 use zeno_cli::render::{View, ViewState};
 
@@ -175,6 +176,11 @@ fn main() -> ExitCode {
     }
     print!("{motion_report}");
 
+    match highlight_probe(&opts.data_dir, &mut failures) {
+        Ok(text) => print!("{text}"),
+        Err(e) => eprintln!("zeno-bench: highlight probe failed: {e}"),
+    }
+
     if !opts.keep {
         for case in &cases {
             let _ = std::fs::remove_file(opts.data_dir.join(&case.name));
@@ -225,6 +231,207 @@ fn range_edit(path: &Path, total_lines: u64) -> Result<String, String> {
 
         let _ = writeln!(out, "| {n} | {delete:.3} | {undo:.3} |");
     }
+    Ok(out)
+}
+
+/// What syntax highlighting costs: what the worker pays, and what the
+/// editor pays to ask.
+///
+/// The worker's costs are not on a budget. Nobody waits for them, a window
+/// the user has scrolled past is cancelled rather than finished, and all of
+/// it happens on its own thread. They are measured because they are still
+/// work the machine does, and because "the colours arrive late" is a quality
+/// question with a number behind it.
+///
+/// The editor's cost *is* on a budget: `request` and `poll` run on every
+/// frame, so they are checked against the keystroke budget like everything
+/// else on that path.
+fn highlight_probe(data_dir: &Path, failures: &mut Vec<String>) -> Result<String, String> {
+    // Highlighting needs a file with a syntax, and the generated cases are
+    // prose in `.txt`, which deliberately has none.
+    let path = data_dir.join("highlight-probe.rs");
+    {
+        let mut w = BufWriter::new(File::create(&path).map_err(|e| e.to_string())?);
+        for i in 0..8_000 {
+            writeln!(w, "fn f{i}(x: u64) -> u64 {{").map_err(|e| e.to_string())?;
+            writeln!(w, "    // what f{i} does").map_err(|e| e.to_string())?;
+            writeln!(w, "    let y = x.wrapping_mul({i});").map_err(|e| e.to_string())?;
+            writeln!(w, "    /* scale it */ y ^ 0x5a5a").map_err(|e| e.to_string())?;
+            writeln!(w, "}}").map_err(|e| e.to_string())?;
+            writeln!(w).map_err(|e| e.to_string())?;
+        }
+        w.flush().map_err(|e| e.to_string())?;
+    }
+
+    /// Waits until the window really is coloured, and says how long that took.
+    ///
+    /// `contains_key` rather than "any colour at all": the previous window's
+    /// colours are still on hand, so waiting for a non-empty map would return
+    /// before the worker had answered.
+    fn colour_window(h: &mut Highlighter, doc: &Doc, first: u64) -> Option<f64> {
+        let t = Instant::now();
+        let last = first + 40;
+        h.request(doc, first, last);
+        loop {
+            h.poll(doc);
+            // The whole window, not just its first line. A window that
+            // overlaps the one already in hand would otherwise find its
+            // first line coloured by the *earlier* walk and report that
+            // walk's cost as its own — which is no measurement at all.
+            if (first..=last).all(|line| h.lines().contains_key(&line)) {
+                return Some(ms(t.elapsed()));
+            }
+            if t.elapsed() > Duration::from_secs(30) {
+                return None;
+            }
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    }
+
+    fn step(out: &mut String, label: &str, value: Option<f64>) {
+        match value {
+            Some(v) => {
+                let _ = writeln!(out, "| {label} | {v:.1} |");
+            }
+            None => {
+                let _ = writeln!(out, "| {label} | no answer within 30 s |");
+            }
+        }
+    }
+
+    // The worker's one-time startup: the syntax definitions and the theme.
+    let t = Instant::now();
+    let set = syntect::parsing::SyntaxSet::load_defaults_nonewlines();
+    let themes = syntect::highlighting::ThemeSet::load_defaults();
+    let startup = ms(t.elapsed());
+    drop((set, themes));
+
+    let mut doc = Doc::open(&path).map_err(|e| e.to_string())?;
+    doc.index_fully();
+    let total = doc.line_count();
+    // A window far from the top, where the distance from the nearest
+    // checkpoint is the whole story.
+    let deep = total.saturating_sub(100).max(1);
+
+    let mut h = Highlighter::start(&path);
+    let top = colour_window(&mut h, &doc, 0);
+    let deep_first = colour_window(&mut h, &doc, deep);
+    let deep_again = colour_window(&mut h, &doc, deep + 1);
+
+    // One edit on the first line. The overlay then reports line 1 as the
+    // earliest line ever changed, and the worker drops every checkpoint from
+    // there down — which is every checkpoint there is — so the next colouring
+    // walks from the top of the file again.
+    doc.edit(Pos::new(0, 0), Pos::new(0, 0), "// ");
+    let deep_after_edit = colour_window(&mut h, &doc, deep);
+
+    // The same neighbourhood again, with nothing changed in between. The walk
+    // above built checkpoints as it went; this is what reusing them costs. If
+    // it costs as much as the walk, the checkpoints are being thrown away and
+    // every scroll re-parses the file from line 1.
+    let deep_after_edit_again = colour_window(&mut h, &doc, deep + 2);
+    if let (Some(walk), Some(again)) = (deep_after_edit, deep_after_edit_again) {
+        if walk > 200.0 && again > walk / 4.0 {
+            failures.push(format!(
+                "highlight probe: re-colouring after an edit took {again:.0} ms against \
+                 {walk:.0} ms for the full walk — checkpoints are not being reused"
+            ));
+        }
+    }
+
+    // What the editor pays to ask. `request` clones the snapshot the worker
+    // will read, and that snapshot carries the overlay, so this is where an
+    // edited document could show up on the input path.
+    let mut scroll = Vec::new();
+    for i in 0..200u64 {
+        let first = (i * 7) % deep;
+        let t = Instant::now();
+        h.request(&doc, first, first + 40);
+        h.poll(&doc);
+        scroll.push(ms(t.elapsed()));
+    }
+    let scroll_ms = median(scroll);
+    drop(h);
+    drop(doc);
+
+    // The same path on a document the user has actually edited: every
+    // keystroke bumps the version, so every keystroke clones the overlay.
+    let edited_lines = 5_000u64;
+    let mut edited = Doc::open(&path).map_err(|e| e.to_string())?;
+    edited.index_fully();
+    for row in 0..edited_lines {
+        edited.edit(Pos::new(row, 0), Pos::new(row, 0), "//x");
+    }
+    let mut h2 = Highlighter::start(&path);
+    let mut typed = Vec::new();
+    for i in 0..200u64 {
+        let t = Instant::now();
+        edited.edit(Pos::new(i, 3), Pos::new(i, 3), "y");
+        h2.request(&edited, 0, 40);
+        h2.poll(&edited);
+        typed.push(ms(t.elapsed()));
+    }
+    let typed_ms = median(typed);
+    drop(h2);
+    drop(edited);
+    // The worker is idle the moment its channel closes, so the mapping is
+    // gone and the file can be removed.
+    std::thread::sleep(Duration::from_millis(50));
+    let _ = std::fs::remove_file(&path);
+
+    for (label, cost) in [
+        ("editor: ask on a clean document", scroll_ms),
+        ("editor: edit + ask, 5000 edited lines", typed_ms),
+    ] {
+        if cost > BUDGET_KEYSTROKE_MS {
+            failures.push(format!(
+                "highlight probe: {label} {cost:.2} ms > {:.0} ms",
+                BUDGET_KEYSTROKE_MS
+            ));
+        }
+    }
+
+    let mut out = String::new();
+    out.push_str(
+        "\nSyntax highlighting — what the worker pays, and what the editor pays to ask:\n",
+    );
+    out.push_str("| step | ms |\n| --- | --- |\n");
+    step(
+        &mut out,
+        "syntax set + theme load (worker startup)",
+        Some(startup),
+    );
+    step(
+        &mut out,
+        "first window, top of file (includes that load)",
+        top,
+    );
+    step(
+        &mut out,
+        &format!("window {deep} lines down, first visit (walks from the top)"),
+        deep_first,
+    );
+    step(
+        &mut out,
+        "the next window (resumes from a checkpoint)",
+        deep_again,
+    );
+    step(
+        &mut out,
+        "that window again after one edit on line 1",
+        deep_after_edit,
+    );
+    step(
+        &mut out,
+        "the same window once more (reusing the checkpoints just built)",
+        deep_after_edit_again,
+    );
+    step(&mut out, "editor: ask on a clean document", Some(scroll_ms));
+    step(
+        &mut out,
+        "editor: edit + ask, 5000 edited lines",
+        Some(typed_ms),
+    );
     Ok(out)
 }
 
@@ -678,6 +885,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
         let view = View {
             doc: &doc,
             state: &state,
+            highlight: None,
         };
         view.render(area, &mut buf);
     }
@@ -691,6 +899,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
             let view = View {
                 doc: &doc,
                 state: &state,
+                highlight: None,
             };
             view.render(area, &mut buf);
         }
@@ -727,6 +936,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
             let view = View {
                 doc: &doc,
                 state: &state,
+                highlight: None,
             };
             view.render(area, &mut buf);
         }

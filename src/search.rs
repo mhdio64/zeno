@@ -22,19 +22,15 @@
 //! exactly like a search that found nothing, and the user cannot tell the
 //! two apart.
 
-use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use memmap2::Mmap;
 use regex::Regex;
 
 use crate::doc::edit::Pos;
-use crate::doc::index::LineIndex;
-use crate::doc::overlay::Overlay;
-use crate::doc::LineEnding;
+use crate::doc::Snapshot;
 
 /// A match, as a line and a range of character columns.
 ///
@@ -145,63 +141,6 @@ impl Pattern {
     }
 }
 
-/// The parts of a document a background scan needs.
-///
-/// The bytes and the line index are shared with the editor, so the scan sees
-/// exactly what the user sees. The overlay is a snapshot: the scan reads a
-/// document as it was when it started.
-#[derive(Clone)]
-pub struct SearchContext {
-    bytes: Arc<Mmap>,
-    index: Arc<LineIndex>,
-    overlay: Overlay,
-    ending: LineEnding,
-}
-
-impl SearchContext {
-    pub fn new(
-        bytes: Arc<Mmap>,
-        index: Arc<LineIndex>,
-        overlay: Overlay,
-        ending: LineEnding,
-    ) -> Self {
-        Self {
-            bytes,
-            index,
-            overlay,
-            ending,
-        }
-    }
-
-    /// The text of a current line, as the editor would show it.
-    fn line_text(&self, line: u64) -> Option<Cow<'_, str>> {
-        crate::doc::line_text_in(
-            &self.overlay,
-            &self.index,
-            &self.bytes,
-            self.ending,
-            line,
-        )
-    }
-
-    /// Scans the rest of the file, so that the number of lines is known.
-    ///
-    /// The index is shared with the editor, so this fills it in for the
-    /// editor too rather than doing the work twice.
-    fn index_fully(&self) {
-        while !self.index.scan_more(&self.bytes[..], SCAN_CHUNK) {}
-    }
-
-    /// The last line of the document, once the file has been scanned.
-    fn last_line(&self) -> Option<u64> {
-        let total = self.index.total_lines()?;
-        Some(self.overlay.line_count(total).saturating_sub(1))
-    }
-}
-
-/// How much of the file one indexing step scans.
-const SCAN_CHUNK: usize = 1 << 20;
-
 /// What a scan is looking for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -243,7 +182,7 @@ pub struct SearchJob {
 
 impl SearchJob {
     /// Starts a scan.
-    pub fn start(context: SearchContext, pattern: Pattern, scope: Scope) -> Self {
+    pub fn start(context: Snapshot, pattern: Pattern, scope: Scope) -> Self {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
         let (sender, receiver) = channel();
@@ -293,7 +232,7 @@ const PROGRESS_EVERY: u64 = 8192;
 
 /// Walks the document looking for matches.
 fn scan(
-    context: SearchContext,
+    context: Snapshot,
     pattern: Pattern,
     scope: Scope,
     cancel: Arc<AtomicBool>,
@@ -311,7 +250,7 @@ fn scan(
 
 /// Counts every match in the document.
 fn scan_all(
-    context: &SearchContext,
+    context: &Snapshot,
     pattern: &Pattern,
     cancel: &AtomicBool,
     sender: &Sender<SearchEvent>,
@@ -343,7 +282,7 @@ fn scan_all(
 /// it finds, so the cost is the distance to the next match rather than the
 /// size of the file.
 fn scan_forward(
-    context: &SearchContext,
+    context: &Snapshot,
     pattern: &Pattern,
     scope: Scope,
     pos: Pos,
@@ -383,7 +322,7 @@ fn scan_forward(
 /// The scan walks backwards from the position's own line, so the cost is the
 /// distance to the previous match and not the size of the file.
 fn scan_backward(
-    context: &SearchContext,
+    context: &Snapshot,
     pattern: &Pattern,
     pos: Pos,
     cancel: &AtomicBool,
@@ -419,7 +358,7 @@ fn scan_backward(
 
 /// Finds the last match in the document.
 fn scan_last(
-    context: &SearchContext,
+    context: &Snapshot,
     pattern: &Pattern,
     cancel: &AtomicBool,
     sender: &Sender<SearchEvent>,
@@ -477,13 +416,8 @@ mod tests {
         doc
     }
 
-    fn context_of(doc: &Doc) -> SearchContext {
-        SearchContext::new(
-            doc.shared_bytes(),
-            doc.index_handle(),
-            doc.overlay().clone(),
-            doc.line_ending(),
-        )
+    fn context_of(doc: &Doc) -> Snapshot {
+        doc.snapshot()
     }
 
     fn pattern(source: &str) -> Pattern {
@@ -491,7 +425,7 @@ mod tests {
     }
 
     /// Runs a scan to completion and returns everything it reported.
-    fn run(context: SearchContext, pattern: Pattern, scope: Scope) -> Vec<SearchEvent> {
+    fn run(context: Snapshot, pattern: Pattern, scope: Scope) -> Vec<SearchEvent> {
         let job = SearchJob::start(context, pattern, scope);
         let mut events = Vec::new();
         for _ in 0..2000 {

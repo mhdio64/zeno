@@ -7,6 +7,7 @@
 
 pub mod clipboard;
 pub mod doc;
+pub mod highlight;
 pub mod motion;
 pub mod prompt;
 pub mod search;

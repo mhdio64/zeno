@@ -24,6 +24,10 @@ pub struct LineEdit {
     pub original_line: u64,
     /// The current lines that take its place.
     pub lines: Vec<String>,
+    /// The document version that last wrote this segment.
+    ///
+    /// See [`Overlay::first_changed_line_since`].
+    pub version: u64,
 }
 
 /// Where a current line lives.
@@ -43,6 +47,11 @@ enum Location {
 #[derive(Debug, Default, Clone)]
 pub struct Overlay {
     segments: Vec<LineEdit>,
+    /// The version segments are stamped with when they are written.
+    ///
+    /// [`Doc`](super::Doc) sets this as it advances the version, so each
+    /// segment remembers which version wrote it.
+    version: u64,
 }
 
 impl Overlay {
@@ -58,6 +67,19 @@ impl Overlay {
     /// Number of edited original lines.
     pub fn len(&self) -> usize {
         self.segments.len()
+    }
+
+    /// The version that edits from now on are stamped with.
+    ///
+    /// `Doc` calls this as it advances its version, so that every segment
+    /// written in that edit remembers it.
+    pub fn set_version(&mut self, version: u64) {
+        self.version = version;
+    }
+
+    /// Records which version wrote a segment.
+    fn stamp(&mut self, segment: usize) {
+        self.segments[segment].version = self.version;
     }
 
     /// Finds where a current line lives.
@@ -88,6 +110,7 @@ impl Overlay {
         match self.locate(current_line) {
             Location::InSegment { segment, entry, .. } => {
                 self.segments[segment].lines[entry] = text;
+                self.stamp(segment);
             }
             Location::Original { original } => {
                 self.upsert(original, vec![text]);
@@ -102,6 +125,7 @@ impl Overlay {
         match self.locate(current_line) {
             Location::InSegment { segment, entry, .. } => {
                 self.segments[segment].lines.splice(entry..entry + 1, lines);
+                self.stamp(segment);
             }
             Location::Original { original } => {
                 self.upsert(original, lines);
@@ -120,10 +144,21 @@ impl Overlay {
             .segments
             .binary_search_by_key(&original, |e| e.original_line)
         {
-            Ok(idx) => self.segments[idx].lines = lines,
-            Err(idx) => self
-                .segments
-                .insert(idx, LineEdit { original_line: original, lines }),
+            Ok(idx) => {
+                self.segments[idx].lines = lines;
+                self.stamp(idx);
+            }
+            Err(idx) => {
+                let version = self.version;
+                self.segments.insert(
+                    idx,
+                    LineEdit {
+                        original_line: original,
+                        lines,
+                        version,
+                    },
+                );
+            }
         }
     }
 
@@ -170,6 +205,30 @@ impl Overlay {
     pub fn line_count(&self, original_lines: u64) -> u64 {
         let delta: i64 = self.segments.iter().map(|e| e.lines.len() as i64 - 1).sum();
         (original_lines as i64 + delta).max(0) as u64
+    }
+
+    /// The lowest current line written since `version`.
+    ///
+    /// Everything above it is the text as it stood at `version`, so work
+    /// computed from those lines — a colour, the parser's state at a line —
+    /// is still true; `None` says nothing has been written since. Each
+    /// segment is stamped with the version that wrote it, which is what
+    /// makes this a question about one interval instead of a question about
+    /// the whole life of the file: an edit at the top does not condemn
+    /// every answer computed after it, forever.
+    pub fn first_changed_line_since(&self, version: u64) -> Option<u64> {
+        let mut delta: i64 = 0;
+        for edit in &self.segments {
+            if edit.version > version {
+                // Every segment before this one was written at or before
+                // `version`, so their line shift is the shift as of then —
+                // and so the current line computed here is the number to
+                // invalidate from.
+                return Some((edit.original_line as i64 + delta).max(0) as u64);
+            }
+            delta += edit.lines.len() as i64 - 1;
+        }
+        None
     }
 }
 
@@ -294,5 +353,39 @@ mod tests {
         assert_eq!(ov.get(2), Some("a"));
         assert_eq!(ov.get(3), Some("c"));
         assert_eq!(ov.line_count(6), 7);
+    }
+
+    #[test]
+    fn an_older_edit_is_not_remembered_against_a_newer_version() {
+        let mut ov = Overlay::new();
+        ov.set_version(1);
+        ov.set_line(5, "x".into());
+        assert_eq!(ov.first_changed_line_since(0), Some(5));
+        assert_eq!(ov.first_changed_line_since(1), None);
+
+        // A later edit, far below the first: asked about the version of
+        // the first, the answer is the *second* — the first has been part
+        // of the document since then and condemns nothing.
+        ov.set_version(2);
+        ov.set_line(20, "y".into());
+        assert_eq!(ov.first_changed_line_since(1), Some(20));
+        assert_eq!(ov.first_changed_line_since(2), None);
+        assert_eq!(ov.first_changed_line_since(0), Some(5));
+    }
+
+    #[test]
+    fn the_boundary_is_counted_in_current_lines() {
+        let mut ov = Overlay::new();
+        ov.set_version(1);
+        // Splitting line 10 into three shifts everything below it down by
+        // two, so the current line of original line 40 is 42.
+        ov.replace_lines(10, vec!["a".into(), "b".into(), "c".into()]);
+        ov.set_version(2);
+        ov.set_line(42, "tail".into());
+        assert_eq!(
+            ov.first_changed_line_since(1),
+            Some(42),
+            "the answer is a line the editor can count from, not an original one"
+        );
     }
 }

@@ -26,11 +26,12 @@ use ratatui::Terminal;
 
 use zeno_cli::clipboard;
 use zeno_cli::doc::edit::Pos;
-use zeno_cli::doc::{identity_of, Doc};
+use zeno_cli::doc::{identity_of, Doc, Snapshot};
+use zeno_cli::highlight::Highlighter;
 use zeno_cli::motion::{self, Motion};
 use zeno_cli::prompt::{Prompt, Purpose};
 use zeno_cli::render::{View, ViewState};
-use zeno_cli::search::{MatchPos, Pattern, Scope, SearchContext, SearchEvent, SearchJob};
+use zeno_cli::search::{MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -248,6 +249,7 @@ fn bench_open_frame(path: &Path) -> ExitCode {
         let view = View {
             doc: &doc,
             state: &state,
+            highlight: None,
         };
         view.render(area, &mut buf);
         Ok(start.elapsed().as_secs_f64() * 1000.0)
@@ -334,10 +336,15 @@ struct Editor {
     /// The search in progress, if any. Its pattern is what the viewport
     /// highlights.
     search: Option<Search>,
+    /// The syntax highlighter. It colours the viewport in the background.
+    highlight: Highlighter,
 }
 
 impl Editor {
     fn new(doc: Doc, path: PathBuf) -> Self {
+        // The highlighter is started first: it works in the background, and
+        // the editor paints plain text until the colours arrive.
+        let highlight = Highlighter::start(&path);
         Self {
             doc,
             path,
@@ -351,6 +358,7 @@ impl Editor {
             osc: None,
             prompt: None,
             search: None,
+            highlight,
         }
     }
 
@@ -1392,13 +1400,8 @@ impl Editor {
     }
 
     /// The document, as a background scan sees it.
-    fn search_context(&self) -> SearchContext {
-        SearchContext::new(
-            self.doc.shared_bytes(),
-            self.doc.index_handle(),
-            self.doc.overlay().clone(),
-            self.doc.line_ending(),
-        )
+    fn search_context(&self) -> Snapshot {
+        self.doc.snapshot()
     }
 
     /// Starts a scan counting the matches in the whole document.
@@ -1549,6 +1552,20 @@ impl Editor {
         }
     }
 
+    /// Asks for the window on screen to be coloured, and takes the colours
+    /// that have arrived.
+    ///
+    /// The highlighter works in its own thread: the request is a message
+    /// and the answer is taken when it turns up, so neither of them holds up
+    /// a frame. The colours of a document that has changed since they were
+    /// computed are dropped rather than believed.
+    fn poll_highlight(&mut self, height: u16) {
+        let first = self.view.top_line;
+        let last = first + height as u64;
+        self.highlight.request(&self.doc, first, last);
+        self.highlight.poll(&self.doc);
+    }
+
     /// Moves the caret to a match and scrolls it into view.
     fn goto_match(&mut self, m: MatchPos) {
         self.move_to(Pos::new(m.line, m.start));
@@ -1670,17 +1687,23 @@ impl Editor {
         let gutter = View {
             doc: &self.doc,
             state: &self.view,
+            highlight: None,
         }
         .gutter_width();
         self.view.width = body.width.saturating_sub(gutter);
         // The window may have changed shape since the last move, so the
         // cursor is brought back into view before anything is painted.
         self.ensure_cursor_visible();
+        // The colours of the window that is about to be painted are asked
+        // for here, so that the frame is painted with the colours that
+        // belong to the text on screen.
+        self.poll_highlight(body.height);
 
         terminal.draw(|f| {
             let view = View {
                 doc: &self.doc,
                 state: &self.view,
+                highlight: Some(self.highlight.lines()),
             };
             let cursor = view.cursor_position(body);
             f.render_widget(view, body);
@@ -1726,6 +1749,15 @@ impl Editor {
         spans.push(Span::raw("  "));
         spans.push(Span::raw(format!("Ln {}", self.view.cursor_line + 1)));
         spans.push(Span::raw(format!(", Col {}", self.view.cursor_col + 1)));
+        // The language of the file, once the highlighter has worked out
+        // what it is.
+        if let Some(syntax) = self.highlight.syntax() {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                syntax.to_string(),
+                Style::default().fg(Color::Magenta),
+            ));
+        }
         spans.push(Span::raw("  "));
         // `line_count` is the *edited* count: it applies the overlay to the
         // index. Once the scan is finished it is exact, so it is what the
@@ -2677,6 +2709,7 @@ mod tests {
         let view = View {
             doc: &e.doc,
             state: &e.view,
+            highlight: None,
         };
         assert_eq!(
             view.match_ranges(1, 20),

@@ -12,6 +12,7 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use crate::doc::edit::Pos;
 use crate::doc::Doc;
+use crate::highlight::Highlighted;
 use crate::search::Pattern;
 
 /// The visible state of the editor.
@@ -65,6 +66,11 @@ impl Default for ViewState {
 pub struct View<'a> {
     pub doc: &'a Doc,
     pub state: &'a ViewState,
+    /// The colours of the lines that have been coloured, if any.
+    ///
+    /// The highlighter works in the background, so this is empty until the
+    /// colours arrive, and stays empty for a file with no syntax.
+    pub highlight: Option<&'a Highlighted>,
 }
 
 impl View<'_> {
@@ -147,6 +153,29 @@ impl View<'_> {
             .collect()
     }
 
+    /// The coloured runs of `line` that fall inside the window.
+    ///
+    /// The spans are in the line's own columns; the window shows a slice of
+    /// them, so they are moved into the window's own columns here.
+    fn syntax_spans(&self, line: u64, left: usize, painted: usize) -> Vec<(usize, usize, Style)> {
+        let Some(highlight) = self.highlight else {
+            return Vec::new();
+        };
+        let Some(spans) = highlight.get(&line) else {
+            return Vec::new();
+        };
+        let mut inside = Vec::new();
+        for span in spans {
+            let start = span.start.max(left);
+            let end = span.end.min(left + painted);
+            if end <= start {
+                continue;
+            }
+            inside.push((start - left, end - left, span.style));
+        }
+        inside
+    }
+
     /// Paints one line, in runs of equal style.
     ///
     /// The line is at most one screen wide, so deciding the style of every
@@ -156,11 +185,20 @@ impl View<'_> {
         &self,
         text: &str,
         base: Style,
+        syntax: &[(usize, usize, Style)],
         selection: Option<(usize, usize)>,
         matches: &[(usize, usize)],
     ) -> Vec<Span<'static>> {
         let chars: Vec<char> = text.chars().collect();
         let mut styles = vec![base; chars.len()];
+        // The syntax says what the text means. It is painted first, because
+        // the search match and the selection say what the user is looking
+        // at, and those win.
+        for (start, end, style) in syntax {
+            for col in *start..(*end).min(chars.len()) {
+                styles[col] = styles[col].patch(*style);
+            }
+        }
         for (start, end) in matches {
             for col in *start..(*end).min(chars.len()) {
                 styles[col] = match_style();
@@ -346,9 +384,11 @@ impl Widget for View<'_> {
                 (from - left, to - left)
             });
             let matches = self.match_ranges_in(head, left - behind, painted);
+            let syntax = self.syntax_spans(line_no, left, painted);
             body_lines.push(Line::from(self.styled_spans(
                 &clipped,
                 base,
+                &syntax,
                 selection,
                 &matches,
             )));
@@ -377,6 +417,7 @@ impl Widget for View<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::highlight::{Highlighted, LineSpan};
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -395,7 +436,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc, state };
+                let view = View { doc, state, highlight: None };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -459,7 +500,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         assert_eq!(view.selection_span(0), Some((1, 4)));
         assert_eq!(view.selection_span(1), None, "the other line is not selected");
 
@@ -467,7 +508,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state };
+                let view = View { doc: &doc, state: &state, highlight: None };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -495,7 +536,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(view.selection_span(1), Some((0, 2)));
         assert_eq!(view.selection_span(2), Some((0, 2)));
@@ -514,7 +555,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(
             view.selection_span(1),
@@ -540,7 +581,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state };
+                let view = View { doc: &doc, state: &state, highlight: None };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -572,7 +613,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state };
+                let view = View { doc: &doc, state: &state, highlight: None };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -606,7 +647,7 @@ mod tests {
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
         };
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         assert!(view.match_ranges(0, 20).is_empty());
     }
 
@@ -623,7 +664,7 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         let area = Rect::new(0, 0, 20, 3);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 1);
@@ -671,7 +712,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state };
+                let view = View { doc: &doc, state: &state, highlight: None };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -693,7 +734,7 @@ mod tests {
         let doc = doc_of("scroll-match.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let mut state = scrolled(12, 0);
         state.highlight_pattern = Some(Pattern::compile("klm").expect("a valid pattern"));
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         // "klm" sits at columns 10 to 13 and the window starts at 12, so
         // only its last character is on screen.
         assert_eq!(view.match_ranges(0, 20), vec![(0, 1)]);
@@ -706,7 +747,7 @@ mod tests {
         let doc = doc_of("scroll-far.txt", format!("{line}\n").as_bytes());
         let mut state = scrolled(100, 0);
         state.highlight_pattern = Some(Pattern::compile("needle").expect("a valid pattern"));
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         assert!(
             view.match_ranges(0, 20).is_empty(),
             "the match is further behind the edge than the scan looks"
@@ -717,7 +758,7 @@ mod tests {
     fn the_cursor_sits_at_its_own_column() {
         let doc = doc_of("cursor-scroll.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 15);
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         let area = Rect::new(0, 0, 24, 2);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 0);
@@ -729,8 +770,133 @@ mod tests {
     fn a_cursor_outside_the_window_is_not_drawn() {
         let doc = doc_of("cursor-off.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 3);
-        let view = View { doc: &doc, state: &state };
+        let view = View { doc: &doc, state: &state, highlight: None };
         let area = Rect::new(0, 0, 24, 2);
         assert!(view.cursor_position(area).is_none());
+    }
+
+    /// The colours of a line, as the highlighter would report them.
+    fn coloured(spans: &[(usize, usize, Color)]) -> Highlighted {
+        let mut highlight = Highlighted::new();
+        highlight.insert(
+            0,
+            spans
+                .iter()
+                .map(|(start, end, colour)| LineSpan {
+                    start: *start,
+                    end: *end,
+                    style: Style::default().fg(*colour),
+                })
+                .collect(),
+        );
+        highlight
+    }
+
+    /// The frame of a view, drawn into a test terminal.
+    fn draw(doc: &Doc, state: &ViewState, highlight: Option<&Highlighted>) -> Buffer {
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View {
+                    doc,
+                    state,
+                    highlight,
+                };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn a_syntax_colour_reaches_the_screen() {
+        let doc = doc_of("colours.txt", b"alpha beta\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 1,
+            cursor_col: 0,
+            show_line_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let highlight = coloured(&[(0, 5, Color::Red)]);
+        let buffer = draw(&doc, &state, Some(&highlight));
+        assert_eq!(buffer[(0, 0)].fg, Color::Red, "'alpha' is coloured");
+        assert_eq!(
+            buffer[(6, 0)].fg,
+            Color::Reset,
+            "the text after the coloured run is not"
+        );
+    }
+
+    #[test]
+    fn the_selection_wins_over_the_syntax_colour() {
+        let doc = doc_of("colours-selection.txt", b"alpha beta\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col: 4,
+            show_line_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: Some(Pos::new(0, 1)),
+            highlight_pattern: None,
+        };
+        let highlight = coloured(&[(0, 5, Color::Red)]);
+        let buffer = draw(&doc, &state, Some(&highlight));
+        assert!(
+            buffer[(2, 0)].modifier.contains(Modifier::REVERSED),
+            "the selection is painted reversed"
+        );
+        assert_eq!(
+            buffer[(2, 0)].fg,
+            Color::Reset,
+            "and not in the colour of the syntax"
+        );
+    }
+
+    #[test]
+    fn the_search_match_wins_over_the_syntax_colour() {
+        let doc = doc_of("colours-match.txt", b"alpha beta\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 1,
+            cursor_col: 0,
+            show_line_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+        };
+        let highlight = coloured(&[(0, 5, Color::Red)]);
+        let buffer = draw(&doc, &state, Some(&highlight));
+        assert_eq!(
+            buffer[(6, 0)].bg,
+            Color::Yellow,
+            "the match is painted in the match style"
+        );
+        assert_eq!(
+            buffer[(6, 0)].fg,
+            Color::Black,
+            "and not in the colour of the syntax"
+        );
+    }
+
+    #[test]
+    fn a_colour_outside_the_window_is_not_painted() {
+        let doc = doc_of("colours-scroll.txt", b"abcdefghijklmnopqrstuvwxyz\n");
+        let mut state = scrolled(10, 0);
+        state.show_line_numbers = false;
+        // The coloured run is at the start of the line, which is off screen.
+        let highlight = coloured(&[(0, 5, Color::Red)]);
+        let buffer = draw(&doc, &state, Some(&highlight));
+        assert_eq!(
+            buffer[(0, 0)].fg,
+            Color::Reset,
+            "the window does not show the coloured run"
+        );
     }
 }
