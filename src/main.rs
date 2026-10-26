@@ -2844,6 +2844,12 @@ impl Editor {
                 self.message.clone(),
                 Style::default().fg(Color::Cyan),
             ));
+        } else {
+            spans.push(Span::raw("  "));
+            spans.push(Span::styled(
+                "F1: Menu  ^S: Save  ^Q: Exit  ^F: Find",
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(28, 28, 34)))
     }
@@ -2881,6 +2887,22 @@ mod tests {
         assert!(
             text.contains("UTF-8"),
             "status line must show encoding: {text}"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_shortcut_hints_when_idle() {
+        let (e, _p) = editor_with("hints.txt", b"hello\n");
+        let area = Rect::new(0, 0, 100, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(
+            text.contains("F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"),
+            "status line must show key hints when idle: {text}"
         );
     }
 
