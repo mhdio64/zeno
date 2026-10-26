@@ -65,6 +65,7 @@ Non-negotiables, each with a decision record:
 | The leader is a chord from `zeno.toml`; user bindings shadow built-ins. | ADR 0022 |
 | The e2e tests drive a real pty, not a fake terminal. | ADR 0023 |
 | `zeno -` runs a second process because a pipe cannot carry keys. | ADR 0020 |
+| Enter cycles find matches; Esc leaves search in two stages. | ADR 0024 |
 
 Design non-goals for v1 (spec §10) — do not quietly add them: tabs/multiple
 files, multi-cursor, LSP/diagnostics, hex view, plugins, persistent undo,
@@ -135,7 +136,7 @@ tools/                tui_probe.py, pty_capture.py (manual drivers)
 docs/spec.md          the product spec — the source of truth for scope
 docs/keymap.md        the user-facing keymap and behaviour contract
 docs/performance.md   measured numbers, findings 1–11, reproduction steps
-docs/adr/0001…0023    one decision record per irreversible choice
+docs/adr/0001…0024    one decision record per irreversible choice
 ```
 
 `src/main.rs` (4,520 lines) holds the editor because the editor is one state

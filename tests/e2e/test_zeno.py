@@ -189,10 +189,19 @@ class ThePrompt(EditorTest):
             self.assertTrue(screen.wait_for("line 1"), screen.text())
             screen.send("\x06")  # Ctrl+F
             screen.type("line 150")
+            screen.send("\r")  # Enter jumps to match and keeps prompt open
             self.assertTrue(
-                screen.wait_for("line 150"),
-                "the match was scrolled into view",
+                screen.wait_for("150 line 150"),
+                "the viewport jumped to line 150 with its gutter number",
             )
+            # The prompt line is still open, replacing the status line
+            self.assertFalse(screen.contains("Ln 150"), "prompt owns status row")
+            screen.send("\x1b")  # First Esc closes prompt, restoring status line with search active
+            self.assertTrue(screen.wait_for("Ln 150"), "status line restored")
+            self.assertTrue(screen.contains("Find: line 150"), "highlights remain active")
+            screen.send("\x1b")  # Second Esc clears active search
+            self.assertTrue(screen.wait_for("find.txt"), screen.text())
+            self.assertFalse(screen.contains("Find: line 150"), "search cleared")
 
 
 @unittest.skipIf(

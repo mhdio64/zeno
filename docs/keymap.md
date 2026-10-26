@@ -130,9 +130,12 @@ Find asks for a pattern in the same prompt. The pattern is compiled as it is
 typed, so the matches in the viewport are highlighted while it is being
 written, and the prompt line says how many matches there are once the
 background scan has counted them. A pattern that does not compile says so on
-the prompt line and keeps the last pattern that did. `Enter` jumps to the
-first match at or after the caret; `Leader n` and `Leader N` cycle through
-the matches and wrap around at the ends of the file.
+the prompt line and keeps the last pattern that did. While the prompt is open,
+`Enter` moves to the next match and keeps the prompt open: the first `Enter`
+jumps to the match at or after the caret, and repeated `Enter`s advance past
+the current match, cycling through all results and wrapping around at the ends
+of the file. Once the prompt is closed, `Leader n` and `Leader N` cycle
+through the matches in the same way.
 
 Esc closes the find prompt and keeps the highlighted matches on screen so you
 can edit the file while looking at them; a second Esc clears the highlight and
@@ -252,7 +255,7 @@ A run of digits before the operator sets a repeat count: `Leader 3 d w` deletes 
 | Linux, macOS | `$XDG_CONFIG_HOME/zeno/zeno.toml`, else `~/.config/zeno/zeno.toml` |
 | Windows | `%APPDATA%\zeno\zeno.toml` |
 
-Only the `[settings]` table is read today. A missing file, a missing key and a
+The `[settings]` and `[keys]` tables are read today. A missing file, a missing key and a
 value that cannot be understood all leave the default in place: a typo in a
 config file is not a reason for an editor not to start.
 

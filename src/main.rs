@@ -497,6 +497,8 @@ struct Search {
     job_version: u64,
     /// The end of the document to try if the scan finds nothing.
     wrap: Option<Wrap>,
+    /// Whether Enter has already jumped to the first match for this pattern.
+    cycled: bool,
 }
 
 struct Editor {
@@ -950,6 +952,7 @@ impl Editor {
         let mut submit: Option<Answer> = None;
         let mut cancel = false;
         let mut escape_leaves_search = false;
+        let mut search_enter = false;
         let mut edited = false;
         {
             let Some(prompt) = self.prompt.as_mut() else {
@@ -967,7 +970,11 @@ impl Editor {
                     }
                 }
                 KeyCode::Enter if prompt.is_text() => {
-                    submit = Some(Answer::Text(prompt.text().to_owned()));
+                    if prompt.purpose() == Purpose::Search {
+                        search_enter = true;
+                    } else {
+                        submit = Some(Answer::Text(prompt.text().to_owned()));
+                    }
                 }
                 KeyCode::Char(c) if !ctrl && !prompt.is_text() => {
                     if let Some(choice) = prompt.choose(c) {
@@ -1011,6 +1018,10 @@ impl Editor {
             // The pattern is compiled as it is typed, so the highlight in
             // the viewport follows the typing.
             self.refresh_search();
+        }
+        if search_enter {
+            self.cycle_search();
+            return;
         }
         if let Some(answer) = submit {
             let purpose = self.prompt.take().map(|prompt| prompt.purpose());
@@ -1102,26 +1113,7 @@ impl Editor {
                     self.replace_all(&pattern, &text);
                 }
                 Purpose::Search => {
-                    if text.is_empty() {
-                        self.clear_search();
-                        return;
-                    }
-                    // The pattern was compiled while it was typed, so the
-                    // search already holds it — unless it did not compile,
-                    // in which case the prompt line says why.
-                    let ready = self
-                        .search
-                        .as_ref()
-                        .is_some_and(|search| search.pattern.source() == text);
-                    if !ready {
-                        self.message = Pattern::compile(&text)
-                            .err()
-                            .unwrap_or_else(|| "invalid pattern".into());
-                        return;
-                    }
-                    self.message.clear();
-                    let scope = Scope::From { pos: self.cursor() };
-                    self.start_scan(scope, Some(Wrap::Start));
+                    self.step_search(&text);
                 }
                 _ => {
                     self.message = format!("unexpected text: {text}");
@@ -2258,6 +2250,9 @@ impl Editor {
             .as_ref()
             .map(|search| search.pattern.source().to_owned())
             .unwrap_or_default();
+        if let Some(search) = self.search.as_mut() {
+            search.cycled = false;
+        }
         self.prompt = Some(Prompt::with_text(Purpose::Search, &previous));
         self.message.clear();
     }
@@ -2380,10 +2375,12 @@ impl Editor {
             job: None,
             job_version: version,
             wrap: None,
+            cycled: false,
         });
         search.pattern = pattern;
         search.total = None;
         search.count_version = version;
+        search.cycled = false;
     }
 
     /// The document, as a background scan sees it.
@@ -2440,6 +2437,9 @@ impl Editor {
             self.open_find();
             return;
         }
+        if let Some(search) = self.search.as_mut() {
+            search.cycled = true;
+        }
         let scope = Scope::After { pos: self.cursor() };
         self.start_scan(scope, Some(Wrap::Start));
     }
@@ -2452,6 +2452,55 @@ impl Editor {
         }
         let scope = Scope::Before { pos: self.cursor() };
         self.start_scan(scope, Some(Wrap::End));
+    }
+
+    /// `Enter` while inside a `Search` prompt: jump to the next match and
+    /// keep the prompt open.
+    fn cycle_search(&mut self) {
+        let text = self
+            .prompt
+            .as_ref()
+            .map(|prompt| prompt.text().to_owned())
+            .unwrap_or_default();
+        self.step_search(&text);
+    }
+
+    /// Advances the search along the document.
+    ///
+    /// The first Enter starts at or after the caret (`Scope::From`), so a
+    /// match already under the cursor is confirmed. Subsequent Enters advance
+    /// past the caret (`Scope::After`), cycling through the matches and
+    /// wrapping around at the ends of the file.
+    fn step_search(&mut self, text: &str) {
+        if text.is_empty() {
+            self.clear_search();
+            return;
+        }
+        let ready = self
+            .search
+            .as_ref()
+            .is_some_and(|search| search.pattern.source() == text);
+        if !ready {
+            self.message = Pattern::compile(text)
+                .err()
+                .unwrap_or_else(|| "invalid pattern".into());
+            return;
+        }
+        self.message.clear();
+        let cycled = self
+            .search
+            .as_ref()
+            .map(|search| search.cycled)
+            .unwrap_or(false);
+        let scope = if cycled {
+            Scope::After { pos: self.cursor() }
+        } else {
+            Scope::From { pos: self.cursor() }
+        };
+        if let Some(search) = self.search.as_mut() {
+            search.cycled = true;
+        }
+        self.start_scan(scope, Some(Wrap::Start));
     }
 
     /// Applies whatever the background scans have reported.
@@ -3973,8 +4022,91 @@ mod tests {
         type_into_prompt(&mut e, "needle");
         e.handle_key(key(KeyCode::Enter));
         settle(&mut e);
+        assert!(e.prompt.is_some(), "Enter must keep the find prompt open");
         assert_eq!(e.view.cursor_line, 2);
         assert_eq!(e.view.cursor_col, 0);
+    }
+
+    #[test]
+    fn enter_cycles_the_matches_and_leaves_the_prompt_open() {
+        let (mut e, _p) = editor_with("find-cycle.txt", b"hit\nx\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+
+        // First Enter: moves to the first match and leaves the prompt open.
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert!(e.prompt.is_some(), "Enter must keep the find prompt open");
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::Search);
+        assert_eq!(e.view.cursor_line, 0, "the first match");
+
+        // Second Enter: advances past the current match while prompt remains open.
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert!(
+            e.prompt.is_some(),
+            "prompt must remain open after second Enter"
+        );
+        assert_eq!(e.view.cursor_line, 2, "the second match");
+
+        // Third Enter: wraps around to the start of the file.
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert!(e.prompt.is_some(), "prompt must remain open after wrapping");
+        assert_eq!(e.view.cursor_line, 0, "wrapped around to the first match");
+    }
+
+    #[test]
+    fn find_first_enter_on_match_at_caret_keeps_match_and_subsequent_enter_advances() {
+        let (mut e, _p) = editor_with("find-at-caret.txt", b"hit\nx\nhit\n");
+        // Caret starts at (0, 0), which is exactly where the first match starts.
+        assert_eq!(e.view.cursor_line, 0);
+        assert_eq!(e.view.cursor_col, 0);
+
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+
+        // First Enter: should use Scope::From and keep the match at the caret.
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 0);
+        assert_eq!(e.view.cursor_col, 0);
+
+        // Second Enter: should use Scope::After and advance past the match at the caret.
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+        assert_eq!(e.view.cursor_line, 2);
+    }
+
+    #[test]
+    fn find_esc_closes_prompt_and_keeps_highlight_second_esc_clears_highlight() {
+        let (mut e, _p) = editor_with("find-two-esc.txt", b"hit\nx\nhit\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        settle(&mut e);
+
+        assert!(e.prompt.is_some());
+        assert!(e.view.highlight_pattern.is_some());
+        assert!(e.search.is_some());
+
+        // First Esc: closes the prompt, keeps the highlight
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.prompt.is_none(), "first Esc closes the prompt");
+        assert!(
+            e.view.highlight_pattern.is_some(),
+            "first Esc keeps the highlights"
+        );
+        assert!(e.search.is_some(), "search state remains active");
+
+        // Second Esc (in ordinary editing): clears the highlight and search state
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.prompt.is_none());
+        assert!(
+            e.view.highlight_pattern.is_none(),
+            "second Esc clears the highlights"
+        );
+        assert!(e.search.is_none(), "second Esc clears the search");
     }
 
     #[test]
@@ -3985,6 +4117,7 @@ mod tests {
         e.handle_key(key(KeyCode::Enter));
         settle(&mut e);
         assert_eq!(e.view.cursor_line, 0, "the first match");
+        e.handle_key(key(KeyCode::Esc));
         sequence(&mut e, "n");
         settle(&mut e);
         assert_eq!(e.view.cursor_line, 2, "the next match");
@@ -4001,6 +4134,7 @@ mod tests {
         e.handle_key(key(KeyCode::Enter));
         settle(&mut e);
         assert_eq!(e.view.cursor_line, 0);
+        e.handle_key(key(KeyCode::Esc));
         sequence(&mut e, "N");
         settle(&mut e);
         assert_eq!(
@@ -4050,6 +4184,7 @@ mod tests {
         type_into_prompt(&mut e, "hit");
         e.handle_key(key(KeyCode::Enter));
         settle(&mut e);
+        e.handle_key(key(KeyCode::Esc));
         e.handle_key(chord(KeyCode::Char('\u{06}')));
         assert_eq!(prompt_text(&e).as_deref(), Some("hit"));
     }
