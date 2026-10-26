@@ -61,8 +61,8 @@ use crate::doc::{Doc, Snapshot};
 /// A dark theme, because the editor's own chrome is dark, and a light
 /// syntax theme on top of it reads as a mistake. The theme's *background*
 /// is deliberately not used: the editor keeps the terminal's own, so that
-/// the selection and the cursor line — which are painted in reverse video —
-/// stay readable.
+/// the selection (which is painted in reverse video) and the cursor line stay
+/// readable.
 const THEME: &str = "base16-ocean.dark";
 
 /// Lines longer than this are not highlighted.

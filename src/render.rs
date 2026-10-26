@@ -498,18 +498,26 @@ fn gutter_style() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// The style of the line the cursor sits on.
+///
+/// A subtle dark-slate background rather than reverse video: reverse video
+/// is glaringly bright and makes the cursor line look like selected text.
+/// A quiet background tint keeps syntax colours readable and lets a
+/// selection (which is reversed) stand out clearly against it.
 fn cursor_line_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+    Style::default().bg(Color::Rgb(36, 40, 50))
 }
 
 fn selection_style() -> Style {
-    Style::default().add_modifier(Modifier::REVERSED)
+    Style::default()
+        .bg(Color::Reset)
+        .add_modifier(Modifier::REVERSED)
 }
 
 /// The style a search match is painted in.
 ///
-/// Not reverse video: the selection and the cursor line already use that,
-/// and two reverse-video ranges on one line cannot be told apart.
+/// A bright yellow match indicator that stands out against both normal
+/// text and the cursor line.
 fn match_style() -> Style {
     Style::default().fg(Color::Black).bg(Color::Yellow)
 }
@@ -559,7 +567,9 @@ impl Widget for View<'_> {
                     format!("{:>width$}", line_no + 1, width = gutter as usize - 1)
                 };
                 let style = if is_cursor {
-                    gutter_style().add_modifier(Modifier::REVERSED)
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     gutter_style()
                 };
@@ -578,10 +588,7 @@ impl Widget for View<'_> {
             let window = skip_chars(head, left - behind);
             let shown = (row.end - row.start).min(body_width as usize);
             let clipped: String = window.chars().take(shown).collect();
-            // While a selection is showing, the cursor line loses its own
-            // highlight: two reverse-video ranges on one line are impossible
-            // to tell apart, and the selection is the more useful of the two.
-            let base = if is_cursor && self.state.anchor.is_none() {
+            let base = if is_cursor {
                 cursor_line_style()
             } else {
                 Style::default()
@@ -596,9 +603,10 @@ impl Widget for View<'_> {
             });
             let matches = self.match_ranges_in(head, left - behind, painted);
             let syntax = self.syntax_spans(line_no, left, painted);
-            body_lines.push(Line::from(
-                self.styled_spans(&clipped, base, &syntax, selection, &matches),
-            ));
+            body_lines.push(
+                Line::from(self.styled_spans(&clipped, base, &syntax, selection, &matches))
+                    .style(base),
+            );
         }
 
         if self.state.show_line_numbers {
@@ -1346,5 +1354,72 @@ mod tests {
             Color::Reset,
             "the window does not show the coloured run"
         );
+    }
+
+    #[test]
+    fn cursor_line_is_subtle_background_and_not_reversed() {
+        let doc = doc_of("cursor-style.txt", b"hello world\nsecond line\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let buffer = draw(&doc, &state, None);
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(36, 40, 50));
+        assert!(
+            !buffer[(0, 0)].modifier.contains(Modifier::REVERSED),
+            "the cursor line must not be reverse video"
+        );
+    }
+
+    #[test]
+    fn cursor_line_differs_from_selection() {
+        let doc = doc_of("cursor-vs-selection.txt", b"abcdef\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 4,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: Some(Pos::new(0, 1)),
+            highlight_pattern: None,
+        };
+        let buffer = draw(&doc, &state, None);
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(36, 40, 50));
+        assert!(!buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn gutter_cursor_line_is_bold_accent_not_reversed() {
+        let doc = doc_of("gutter-cursor.txt", b"line 1\nline 2\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: true,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let buffer = draw(&doc, &state, None);
+        assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
+        assert!(buffer[(2, 0)].modifier.contains(Modifier::BOLD));
     }
 }
