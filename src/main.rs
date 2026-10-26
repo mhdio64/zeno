@@ -2801,6 +2801,8 @@ impl Editor {
             ));
         }
         spans.push(Span::raw("  "));
+        spans.push(Span::raw("UTF-8"));
+        spans.push(Span::raw("  "));
         // `line_count` is the *edited* count: it applies the overlay to the
         // index. Once the scan is finished it is exact, so it is what the
         // status bar should show in both cases.
@@ -2856,6 +2858,22 @@ mod tests {
 
     fn line(editor: &Editor, n: u64) -> String {
         editor.doc.line_text(n).unwrap_or_default().into_owned()
+    }
+
+    #[test]
+    fn status_line_shows_utf8_encoding() {
+        let (e, _p) = editor_with("encoding.txt", b"hello\n");
+        let area = Rect::new(0, 0, 80, 1);
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(
+            text.contains("UTF-8"),
+            "status line must show encoding: {text}"
+        );
     }
 
     #[test]

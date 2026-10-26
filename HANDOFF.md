@@ -245,13 +245,10 @@ Implemented and tested:
 
 Known gaps and inconsistencies (deliberately listed, not hidden):
 
-1. **Config is read once at startup.** Spec §6 still says "reloaded when it
-   changes on disk"; `docs/keymap.md` says "read once at startup". ADR 0022
-   names live reload as work not done. Decide and make the three agree.
+1. ~~**Config is read once at startup**~~ (Fixed: spec §6 updated to "read once at startup", agreeing with keymap.md and ADR 0022).
 2. ~~**`docs/keymap.md` contradicts itself** in one paragraph~~ (Fixed: both `[settings]` and `[keys]` are noted as read).
 3. ~~**Mouse capture is enabled** (`EnableMouseCapture`)~~ (Fixed: capture removed in accordance with spec §4.2 "no mouse", restoring native terminal selection).
-4. **No encoding in the status line**, though spec §4.2 lists it (line count is
-   shown instead). Encoding is detected for save, not displayed.
+4. ~~**No encoding in the status line**~~ (Fixed: UTF-8 encoding label added to status line per spec §4.2).
 5. **Themes are not implemented** while `keymap.md` calls `themes/` "reserved
    for later"; the theme is fixed.
 6. ~~**The e2e find test is weaker than it looks**~~ (Fixed: tightened to assert gutter line 150 scrolled into view and prompt lifecycle).

@@ -95,7 +95,7 @@ Leader sequences are two-part: an operator — `d` delete, `c` change, `y` yank,
 
 ## 6. Configuration
 
-- `zeno.toml`, TOML, reloaded when it changes on disk.
+- `zeno.toml`, TOML, read once at startup.
 - `$XDG_CONFIG_HOME/zeno/zeno.toml`, else `~/.config/zeno/zeno.toml` on Linux and macOS, `%APPDATA%\zeno\zeno.toml` on Windows.
 - The directory also holds `syntaxes/` and `themes/`. (ADR 0008)
 
