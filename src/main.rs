@@ -720,7 +720,8 @@ impl Editor {
 
         if self.keys.is_leader(&key) {
             self.seq.start();
-            self.message = "Leader…".into();
+            self.message =
+                "Actions: [s] Save  [q] Quit  [f] Find  [p] Palette  [?] Help  [w] Wrap".into();
             return;
         }
 
@@ -1276,7 +1277,7 @@ impl Editor {
             Command::Save => self.save(),
             Command::Quit => {
                 if self.dirty {
-                    self.message = "unsaved changes — Leader s saves, Leader Q discards".into();
+                    self.message = "unsaved changes — Ctrl+S saves, Leader Q discards".into();
                 } else {
                     self.quit = true;
                 }
@@ -3190,7 +3191,10 @@ mod tests {
         assert!(Keymap::default().is_leader(&leader));
         e.handle_key(leader);
         assert!(!e.seq.is_idle());
-        assert_eq!(e.message, "Leader…");
+        assert_eq!(
+            e.message,
+            "Actions: [s] Save  [q] Quit  [f] Find  [p] Palette  [?] Help  [w] Wrap"
+        );
     }
 
     #[test]
@@ -3540,7 +3544,11 @@ mod tests {
         e.insert_char('x');
         sequence(&mut e, "q");
         assert!(!e.quit);
-        assert!(e.message.contains("unsaved changes"), "{}", e.message);
+        assert!(
+            e.message.contains("unsaved changes") && e.message.contains("Ctrl+S saves"),
+            "{}",
+            e.message
+        );
         sequence(&mut e, "Q");
         assert!(e.quit);
     }
