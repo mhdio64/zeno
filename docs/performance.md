@@ -19,15 +19,15 @@ exits non-zero if a budget is missed.
 
 | file | size | lines | cold start | first frame | repaint | edit | keystroke | warm first frame | warm keystroke | index MB/s | launch |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| text-1mb.txt | 1.0 MiB | 38,182 | 85.8 | 86.2 | 0.1 | 0.0 | 0.1 | 0.3 | 0.1 | 71 | 29.5 |
-| text-100mb.txt | 100.0 MiB | 3,818,294 | 260.1 | 260.3 | 0.1 | 0.0 | 0.1 | 0.9 | 0.1 | 771 | 11.6 |
-| text-1024mb.txt | 1.0 GiB | 39,099,297 | 337.1 | 337.2 | 0.1 | 0.0 | 0.1 | 20.7 | 0.1 | 619 | 12.0 |
-| one-line-16mb.txt | 16.0 MiB | 1 | 26.6 | 45.2 | 0.9 | 6.4 | 5.9 | 19.2 | 6.6 | 831 | 13.0 |
-| no-trailing-newline.txt | 64.0 KiB | 2,386 | 15.3 | 15.5 | 0.1 | 0.0 | 0.1 | 0.2 | 0.1 | 273 | 11.0 |
-| crlf.txt | 64.0 KiB | 2,302 | 19.1 | 19.3 | 0.1 | 0.0 | 0.1 | 0.2 | 0.1 | 255 | 11.1 |
-| unicode.txt | 64.1 KiB | 772 | 12.4 | 13.5 | 0.1 | 0.0 | 0.1 | 0.3 | 0.1 | 241 | 21.2 |
-| invalid-utf8.txt | 64.0 KiB | 2,362 | 13.9 | 14.1 | 0.1 | 0.0 | 0.1 | 0.2 | 0.1 | 278 | 22.2 |
-| utf16le-bom.txt | 64.0 KiB | 1,214 | 21.3 | 21.5 | 0.1 | 0.0 | 0.1 | 0.2 | 0.1 | 244 | 10.5 |
+| text-1mb.txt | 1.0 MiB | 38182 | 76.7 | 76.9 | 0.1 | 0.0 | 0.1 | 0.4 | 0.1 | 783 | 8.7 |
+| text-100mb.txt | 100.0 MiB | 3818294 | 264.0 | 264.4 | 0.1 | 0.0 | 0.1 | 0.4 | 0.1 | 1299 | 12.7 |
+| text-1024mb.txt | 1.0 GiB | 39099297 | 259.1 | 259.3 | 0.1 | 0.0 | 0.1 | 0.7 | 0.1 | 981 | 21.6 |
+| one-line-16mb.txt | 16.0 MiB | 1 | 35.9 | 52.8 | 1.1 | 10.2 | 10.0 | 6.9 | 10.0 | 2326 | 21.1 |
+| no-trailing-newline.txt | 64.0 KiB | 2386 | 13.0 | 13.2 | 0.1 | 0.0 | 0.1 | 0.4 | 0.1 | 169 | 7.3 |
+| crlf.txt | 64.0 KiB | 2302 | 14.4 | 14.6 | 0.1 | 0.0 | 0.1 | 0.5 | 0.1 | 126 | 8.1 |
+| unicode.txt | 64.1 KiB | 772 | 13.2 | 14.2 | 0.1 | 0.0 | 0.1 | 0.4 | 0.1 | 173 | 8.4 |
+| invalid-utf8.txt | 64.0 KiB | 2362 | 13.0 | 13.2 | 0.1 | 0.0 | 0.1 | 0.4 | 0.1 | 155 | 7.4 |
+| utf16le-bom.txt | 64.0 KiB | 1214 | 16.5 | 16.7 | 0.1 | 0.0 | 0.1 | 0.8 | 0.1 | 80 | 8.8 |
 
 All times in milliseconds. `cold start` is the first touch of a fresh file;
 `warm` is the second touch. `launch` is the cost of starting the process at
@@ -37,20 +37,20 @@ Cold open breakdown — the first time a fresh file is opened:
 
 | file | file open | mmap | fault in 1 MiB |
 | --- | --- | --- | --- |
-| text-1mb.txt | 68.6 | 0.0 | 0.6 |
-| text-100mb.txt | 347.0 | 0.0 | 0.5 |
-| text-1024mb.txt | 391.1 | 0.0 | 0.4 |
-| one-line-16mb.txt | 5.8 | 0.0 | 0.4 |
-| no-trailing-newline.txt | 16.7 | 0.0 | 0.0 |
-| crlf.txt | 22.9 | 0.0 | 0.0 |
-| unicode.txt | 10.8 | 0.0 | 0.0 |
-| invalid-utf8.txt | 11.8 | 0.0 | 0.0 |
-| utf16le-bom.txt | 9.6 | 0.0 | 0.0 |
+| text-1mb.txt | 66.8 | 0.0 | 0.4 |
+| text-100mb.txt | 238.0 | 0.0 | 0.4 |
+| text-1024mb.txt | 329.1 | 0.0 | 0.4 |
+| one-line-16mb.txt | 8.7 | 0.0 | 0.4 |
+| no-trailing-newline.txt | 18.2 | 0.0 | 0.0 |
+| crlf.txt | 12.6 | 0.0 | 0.0 |
+| unicode.txt | 7.9 | 0.0 | 0.0 |
+| invalid-utf8.txt | 12.2 | 0.0 | 0.0 |
+| utf16le-bom.txt | 10.1 | 0.0 | 0.0 |
 
 ## Finding 1 — the design holds, by two orders of magnitude
 
 On a 1 GiB file with 39 million lines, the editor reaches its first painted
-frame in **0.5 ms** and repaints after a keystroke in **0.1 ms**. The
+frame in **0.7 ms** and repaints after a keystroke in **0.1 ms**. The
 viewport cost is proportional to the height of the viewport and not to the
 size of the file, which is the entire point of mapping the file and
 discovering lines on demand. The 16 ms keystroke budget is met with two
@@ -63,16 +63,16 @@ under 50 ms". On this machine that is false, and the reason is not the
 editor.
 
 The breakdown is unambiguous: **`mmap` costs 0.0 ms in every single case.**
-The entire cold cost is inside `File::open` — 69 ms for 1 MiB, 347 ms for
-100 MiB, 391 ms for 1 GiB — and faulting the first mebibyte into memory
+The entire cold cost is inside `File::open` — 67 ms for 1 MiB, 238 ms for
+100 MiB, 329 ms for 1 GiB — and faulting the first mebibyte into memory
 costs 0.4 ms.
 
 `File::open` on Windows is `CreateFile`, and this machine has Windows
 Defender real-time protection enabled, which scans a file the first time it
 is opened and charges that scan to the opener. The cost is paid **once per
-file**: the second open of the same file is 0.3 ms. It is also not
-proportional to size beyond a point — the 1 GiB file costs only 44 ms more
-than the 1 MiB one.
+file**: the second open of the same file is 0.4 ms. It is also not
+proportional to size beyond a point — the 1 GiB file costs only 91 ms more
+than the 100 MiB one.
 
 So the "under 50 ms" budget was, in practice, a budget on Windows Defender.
 
@@ -86,7 +86,7 @@ dishonest.
 ## Finding 3 — process launch alone eats the 30 ms budget
 
 Starting the process — loading the binary, resolving imports, entering
-`main` — costs **10–30 ms** on Windows before the editor has read a single
+`main` — costs **7–22 ms** on Windows before the editor has read a single
 byte of the file. The original "process launch to first frame for an empty
 file, under 30 ms" budget was therefore mostly a budget for the Windows
 loader, and it has almost no slack in it.
@@ -98,10 +98,10 @@ in the budget, because the empty file is not faster to launch.
 ## Finding 4 — a single enormous line is the one place the data structure shows
 
 `one-line-16mb.txt` is a 16 MiB file with no newline in it. Its keystroke
-cost is **6.6 ms** against 0.1 ms for ordinary text — and it moves between
+cost is **10.0 ms** against 0.1 ms for ordinary text — and it moves between
 runs (6.6 to 10.4 ms measured), because it is dominated by a 16 MiB copy
 competing with whatever else the machine is doing. The cause is the line-level
-edit overlay: an edit rewrites the whole line, so an edit costs O(line length). Repaint stays at 0.9 ms, because the renderer clips each
+edit overlay: an edit rewrites the whole line, so an edit costs O(line length). Repaint stays at 1.1 ms, because the renderer clips each
 line to the width of the viewport before painting it.
 
 This is a property of the prototype's data structure, not of the design. A
@@ -127,8 +127,8 @@ wider than strictly necessary.
 
 ## Finding 6 — the background index is fast enough and does not block
 
-Indexing the whole file runs at **470–770 MB/s** (1 GiB in about two
-seconds) on a background thread that yields between chunks. The foreground
+Indexing the whole file runs at **780–1300 MB/s** (1 GiB in about one
+second) on a background thread that yields between chunks. The foreground
 never waits for it: a keystroke at any point during indexing costs 0.1 ms.
 The foreground does block on one thing — "go to the end of the file" has to
 scan the whole file to know where the end is. That is the honest cost of
@@ -148,9 +148,9 @@ measures one command deleting N lines and then undoing it:
 
 | lines | delete | undo |
 | --- | --- | --- |
-| 1 000 | 0.25 ms | 0.06 ms |
-| 4 000 | 3.4 ms | 0.3 ms |
-| 16 000 | 52 ms | 1.0 ms |
+| 1000 | 1.094 | 0.121 |
+| 4000 | 6.947 | 0.543 |
+| 16000 | 129.837 | 2.243 |
 
 Four times the lines costs sixteen times the time: the line-anchored overlay
 deletes one line at a time, and each deletion walks the segment list. Undo is
@@ -178,16 +178,19 @@ result against the 16 ms keystroke budget:
 
 | file | line 1 (chars) | w | e | b |
 | --- | --- | --- | --- | --- |
-| text-1mb.txt | 48 | 0.000 ms | 0.000 ms | 0.000 ms |
-| text-16mb.txt | 48 | 0.000 ms | 0.000 ms | 0.000 ms |
-| one-line-16mb.txt | 16 777 216 | 1.2 ms | 2.8 ms | 0.5 ms |
-| no-trailing-newline.txt | 48 | 0.000 ms | 0.000 ms | 0.000 ms |
-| crlf.txt | 48 | 0.000 ms | 0.000 ms | 0.000 ms |
-| unicode.txt | 39 | 0.000 ms | 0.000 ms | 0.000 ms |
+| text-1mb.txt | 48 | 0.000 | 0.000 | 0.000 |
+| text-100mb.txt | 48 | 0.000 | 0.000 | 0.000 |
+| text-1024mb.txt | 48 | 0.000 | 0.000 | 0.000 |
+| one-line-16mb.txt | 16777216 | 1.576 | 2.677 | 0.927 |
+| no-trailing-newline.txt | 48 | 0.000 | 0.000 | 0.000 |
+| crlf.txt | 48 | 0.000 | 0.000 | 0.000 |
+| unicode.txt | 39 | 0.000 | 0.000 | 0.000 |
+| invalid-utf8.txt | 48 | 0.000 | 0.000 | 0.000 |
+| utf16le-bom.txt | 54 | 0.000 | 0.000 | 0.000 |
 
 A motion reads at most the rest of the cursor's line and never allocates a
 copy of it, so ordinary text costs nothing measurable and the only shape that
-shows is the 16 MiB single line: 2.8 ms to scan 16 million characters, still
+shows is the 16 MiB single line: 2.7 ms to scan 16 million characters, still
 well inside the budget. Both word scans walk one `Chars` iterator forward (or
 one reversed slice backward) and track the column as they go, instead of
 indexing "character at column n" per step, which would have been quadratic in
@@ -209,20 +212,20 @@ pays to ask.
 
 | step | ms |
 | --- | --- |
-| syntax set + theme load (worker startup) | 1.1 |
-| first window, top of file (includes that load) | 26.4 |
-| window 47 900 lines down, first visit (walks from the top) | 1887.2 |
-| the next window (resumes from a checkpoint) | 2.5 |
-| that window again after one edit on line 1 | 1866.6 |
-| the same window once more (reusing the checkpoints just built) | 2.2 |
+| syntax set + theme load (worker startup) | 6.7 |
+| first window, top of file (includes that load) | 161.3 |
+| window 47900 lines down, first visit (walks from the top) | 2156.3 |
+| the next window (resumes from a checkpoint) | 2.1 |
+| that window again after one edit on line 1 | 2312.8 |
+| the same window once more (reusing the checkpoints just built) | 7.8 |
 | editor: ask on a clean document | 0.0 |
-| editor: edit + ask, 5000 edited lines | 0.3 |
+| editor: edit + ask, 5000 edited lines | 0.4 |
 
-The two ~1.9-second rows are the honest cost of walking a TextMate parser
+The two ~2.2-second rows are the honest cost of walking a TextMate parser
 over 48,000 lines of a file nobody has coloured yet — and, after an edit
 on line 1, of walking it again, because the state at line 47,900 genuinely
 depends on the line that changed. The design is vindicated by the rows
-around them: a window near the bottom of the file costs **2.5 ms** once
+around them: a window near the bottom of the file costs **2.1 ms** once
 anything has been walked, because a checkpoint of the parser's state sits
 no further than 512 lines away, and the editor's own cost to ask is
 nothing measurable, because it asks and paints plain text rather than
@@ -240,7 +243,7 @@ rest of the session: rebuild, discard, re-walk. The right question is per
 checkpoint: *has anything above this line been written since the version
 it was built at?* — answerable because every overlay segment remembers
 the version that wrote it (ADR 0018). After the fix the same row is
-**2.2 ms**, and the harness fails the run if it ever becomes a walk again.
+**7.8 ms**, and the harness fails the run if it ever becomes a walk again.
 
 The same rule guards the editor's own colour cache: only the lines from
 the edit down are forgotten. Before the fix, one edit near the top meant
@@ -302,7 +305,7 @@ These are gaps, not passes:
 
 ```
 cargo build --release
-cargo test                      # 209 tests
+cargo test                      # 346 tests
 ./target/release/zeno-bench --sizes 1mb,100mb,1024mb --frames 200
 ```
 

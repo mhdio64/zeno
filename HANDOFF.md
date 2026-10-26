@@ -252,8 +252,7 @@ Known gaps and inconsistencies (deliberately listed, not hidden):
 5. **Themes are not implemented** while `keymap.md` calls `themes/` "reserved
    for later"; the theme is fixed.
 6. ~~**The e2e find test is weaker than it looks**~~ (Fixed: tightened to assert gutter line 150 scrolled into view and prompt lifecycle).
-7. `docs/performance.md` numbers come from an earlier machine state; regenerate
-   with `cargo run --release --bin zeno-bench` before quoting them.
+7. ~~**`docs/performance.md` numbers come from an earlier machine state**~~ (Fixed: regenerated with `cargo run --release --bin zeno-bench` and updated in docs/performance.md).
 
 ---
 
