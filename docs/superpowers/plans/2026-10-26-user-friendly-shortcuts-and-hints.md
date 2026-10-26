@@ -37,13 +37,13 @@
 - Modify: `docs/keymap.md:48`
 - Test: `src/main.rs` (in `mod tests`)
 
-- [ ] **Step 1.1**: Write a failing test in `src/main.rs` verifying that pressing `Ctrl+P` opens the command palette.
-- [ ] **Step 1.2**: Run `cargo test ctrl_p` to confirm failure.
-- [ ] **Step 1.3**: Add `Some('p') => { self.open_palette(); return; }` to `chord_letter` handling in `Editor::handle_key` in `src/main.rs`.
-- [ ] **Step 1.4**: Update `keys` in `src/panel.rs` for `Command::Palette` to `"ctrl+p / f1 / leader p"`.
-- [ ] **Step 1.5**: Update `docs/keymap.md` table to list `Ctrl+P` / `F1`.
-- [ ] **Step 1.6**: Run `cargo test` and verify tests pass.
-- [ ] **Step 1.7**: Commit changes with message `Support Ctrl+P for command palette, and document the binding`.
+- [x] **Step 1.1**: Write a failing test in `src/main.rs` verifying that pressing `Ctrl+P` opens the command palette.
+- [x] **Step 1.2**: Run `cargo test ctrl_p` to confirm failure.
+- [x] **Step 1.3**: Add `Some('p') => { self.open_palette(); return; }` to `chord_letter` handling in `Editor::handle_key` in `src/main.rs`.
+- [x] **Step 1.4**: Update `keys` in `src/panel.rs` for `Command::Palette` to `"ctrl+p / f1 / leader p"`.
+- [x] **Step 1.5**: Update `docs/keymap.md` table to list `Ctrl+P` / `F1`.
+- [x] **Step 1.6**: Run `cargo test` and verify tests pass.
+- [x] **Step 1.7**: Commit changes with message `Support Ctrl+P for command palette, and document the binding`.
 
 ---
 
@@ -53,12 +53,12 @@
 - Modify: `src/main.rs:721-725`, `src/main.rs:1275`
 - Test: `src/main.rs` (in `mod tests`)
 
-- [ ] **Step 2.1**: Write unit tests verifying that pressing the leader key sets a friendly actions cheatsheet and dirty exit message uses `Ctrl+S`.
-- [ ] **Step 2.2**: Run `cargo test leader` to observe failure.
-- [ ] **Step 2.3**: In `src/main.rs`, update `self.message` on leader press to `"Actions: [s] Save  [q] Quit  [f] Find  [p] Palette  [?] Help  [w] Wrap"`.
-- [ ] **Step 2.4**: In `src/main.rs`, update `Command::Quit` dirty message from `"unsaved changes — Leader s saves, Leader Q discards"` to `"unsaved changes — Ctrl+S saves, Leader Q discards"`.
-- [ ] **Step 2.5**: Run `cargo test` and verify all tests pass.
-- [ ] **Step 2.6**: Commit changes with message `Show an action cheatsheet on leader key, and clarify unsaved changes message`.
+- [x] **Step 2.1**: Write unit tests verifying that pressing the leader key sets a friendly actions cheatsheet and dirty exit message uses `Ctrl+S`.
+- [x] **Step 2.2**: Run `cargo test leader` to observe failure.
+- [x] **Step 2.3**: In `src/main.rs`, update `self.message` on leader press to `"Actions: [s] Save  [q] Quit  [f] Find  [p] Palette  [?] Help  [w] Wrap"`.
+- [x] **Step 2.4**: In `src/main.rs`, update `Command::Quit` dirty message from `"unsaved changes — Leader s saves, Leader Q discards"` to `"unsaved changes — Ctrl+S saves, Leader Q discards"`.
+- [x] **Step 2.5**: Run `cargo test` and verify all tests pass.
+- [x] **Step 2.6**: Commit changes with message `Show an action cheatsheet on leader key, and clarify unsaved changes message`.
 
 ---
 
@@ -68,11 +68,11 @@
 - Modify: `src/main.rs:2836-2843`
 - Test: `src/main.rs` (in `mod tests`)
 
-- [ ] **Step 3.1**: Write a unit test asserting that `status_line()` includes `"F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"` when `self.message.is_empty()`.
-- [ ] **Step 3.2**: Run `cargo test status_line` to observe failure.
-- [ ] **Step 3.3**: In `Editor::status_line()`, when `self.message.is_empty()`, push a styled DarkGray hint span `"F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"`.
-- [ ] **Step 3.4**: Run `cargo test` and verify all tests pass.
-- [ ] **Step 3.5**: Commit changes with message `Display shortcut hints in status bar when idle`.
+- [x] **Step 3.1**: Write a unit test asserting that `status_line()` includes `"F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"` when `self.message.is_empty()`.
+- [x] **Step 3.2**: Run `cargo test status_line` to observe failure.
+- [x] **Step 3.3**: In `Editor::status_line()`, when `self.message.is_empty()`, push a styled DarkGray hint span `"F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"`.
+- [x] **Step 3.4**: Run `cargo test` and verify all tests pass.
+- [x] **Step 3.5**: Commit changes with message `Display shortcut hints in status bar when idle`.
 
 ---
 
@@ -82,9 +82,9 @@
 - Modify: `src/panel.rs:117-129`
 - Test: `src/panel.rs` (in `mod tests`)
 
-- [ ] **Step 4.1**: Update `REFERENCE` in `src/panel.rs` to clarify `"y copy (yank)"`.
-- [ ] **Step 4.2**: Run `cargo test panel` to verify.
-- [ ] **Step 4.3**: Commit changes with message `Clarify copy in help panel reference`.
+- [x] **Step 4.1**: Update `REFERENCE` in `src/panel.rs` to clarify `"y copy (yank)"`.
+- [x] **Step 4.2**: Run `cargo test panel` to verify.
+- [x] **Step 4.3**: Commit changes with message `Clarify copy in help panel reference`.
 
 ---
 
@@ -93,8 +93,8 @@
 **Files:**
 - Verification only
 
-- [ ] **Step 5.1**: Run `cargo test` (all unit and integration tests).
-- [ ] **Step 5.2**: Run `cargo fmt -- --check`.
-- [ ] **Step 5.3**: Run `cargo clippy --all-targets -- -D warnings`.
-- [ ] **Step 5.4**: Run `cargo build --release`.
-- [ ] **Step 5.5**: Run `python -m unittest discover -s tests/e2e -v`.
+- [x] **Step 5.1**: Run `cargo test` (all unit and integration tests).
+- [x] **Step 5.2**: Run `cargo fmt -- --check`.
+- [x] **Step 5.3**: Run `cargo clippy --all-targets -- -D warnings`.
+- [x] **Step 5.4**: Run `cargo build --release`.
+- [x] **Step 5.5**: Run `python -m unittest discover -s tests/e2e -v`.
