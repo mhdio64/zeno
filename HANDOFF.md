@@ -248,21 +248,13 @@ Known gaps and inconsistencies (deliberately listed, not hidden):
 1. **Config is read once at startup.** Spec §6 still says "reloaded when it
    changes on disk"; `docs/keymap.md` says "read once at startup". ADR 0022
    names live reload as work not done. Decide and make the three agree.
-2. **`docs/keymap.md` contradicts itself** in one paragraph: "Only the
-   `[settings]` table is read today." followed a few lines later by "`[keys]` is
-   read as well." The second is true. Fix the first sentence.
-3. **Mouse capture is enabled** (`EnableMouseCapture`) but no `Event::Mouse` is
-   handled, and spec §4.2 says "no mouse". Enabling capture also suppresses the
-   terminal's own text selection. Either handle it or stop capturing.
+2. ~~**`docs/keymap.md` contradicts itself** in one paragraph~~ (Fixed: both `[settings]` and `[keys]` are noted as read).
+3. ~~**Mouse capture is enabled** (`EnableMouseCapture`)~~ (Fixed: capture removed in accordance with spec §4.2 "no mouse", restoring native terminal selection).
 4. **No encoding in the status line**, though spec §4.2 lists it (line count is
    shown instead). Encoding is detected for save, not displayed.
 5. **Themes are not implemented** while `keymap.md` calls `themes/` "reserved
    for later"; the theme is fixed.
-6. **The e2e find test is weaker than it looks**:
-   `test_find_reaches_a_line_further_down` types `line 150` and waits for the
-   text `line 150` on screen — which the *prompt line itself* satisfies. It does
-   not prove the viewport jumped. Tighten it (assert a gutter row far from the
-   prompt, or a second distinct marker) when next touching find.
+6. ~~**The e2e find test is weaker than it looks**~~ (Fixed: tightened to assert gutter line 150 scrolled into view and prompt lifecycle).
 7. `docs/performance.md` numbers come from an earlier machine state; regenerate
    with `cargo run --release --bin zeno-bench` before quoting them.
 

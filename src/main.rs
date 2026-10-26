@@ -9,10 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crossterm::event::{
-    self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyEventKind,
-    KeyModifiers,
-};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -641,19 +638,14 @@ impl Editor {
     fn run(&mut self) -> Result<(), String> {
         enable_raw_mode().map_err(|e| e.to_string())?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture).map_err(|e| e.to_string())?;
+        execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
         let result = self.event_loop(&mut terminal);
 
         disable_raw_mode().ok();
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )
-        .ok();
+        execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
         terminal.show_cursor().ok();
 
         result
