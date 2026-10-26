@@ -117,7 +117,7 @@ pub const ENTRIES: &[Entry] = &[
 const REFERENCE: &[(&str, &str)] = &[
     (
         "operators",
-        "d delete   c change   y yank   v select   > <  reindent",
+        "d delete   c change   y copy (yank)   v select   > <  reindent",
     ),
     ("motions", "h l j k   w W b B e E   $ 0 ^   { }   ( )   %"),
     (
@@ -408,6 +408,10 @@ mod tests {
         let all = help_lines(0, help_height());
         assert!(all.len() >= ENTRIES.len(), "every command is listed");
         assert!(all.iter().any(|line| line.to_string().contains("grammar")));
+        assert!(
+            all.iter()
+                .any(|line| line.to_string().contains("copy (yank)"))
+        );
         let scrolled = help_lines(3, 4);
         assert_eq!(scrolled.len(), 4);
         assert_ne!(
