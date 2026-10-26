@@ -45,7 +45,7 @@ Two caveats worth knowing before rebinding:
 | `Shift+arrows` | Extend selection |
 | `Shift+Home` `Shift+End` | Extend to line start / end |
 | `Shift+Tab` | Unindent line |
-| `F1` | Command palette |
+| `Ctrl+P` `F1` | Command palette |
 
 `Ctrl+Shift+<letter>` is deliberately absent: legacy terminal input encodes it identically to `Ctrl+<letter>`, and crossterm cannot use the Kitty keyboard protocol on Windows to tell them apart. Every command reachable only through `Ctrl+Shift+<letter>` in VSCode has a two-key route here.
 

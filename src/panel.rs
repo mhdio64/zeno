@@ -106,7 +106,7 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::Help,
     },
     Entry {
-        keys: "f1 / leader p",
+        keys: "ctrl+p / f1 / leader p",
         label: "Command palette",
         command: Command::Palette,
     },

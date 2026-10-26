@@ -809,6 +809,10 @@ impl Editor {
                     self.select_line();
                     return;
                 }
+                Some('p') => {
+                    self.open_palette();
+                    return;
+                }
                 Some('z') => {
                     self.undo();
                     return;
@@ -4419,6 +4423,13 @@ mod tests {
         e.handle_key(key(KeyCode::Enter));
         assert!(e.view.word_wrap, "running the command took effect");
         assert!(e.overlay.is_none(), "and the palette closed");
+    }
+
+    #[test]
+    fn ctrl_p_opens_the_palette() {
+        let (mut e, _p) = editor_with("palette-ctrl-p.txt", b"ab\n");
+        e.handle_key(chord(KeyCode::Char('p')));
+        assert!(matches!(e.overlay, Some(Overlay::Palette(_))));
     }
 
     #[test]
