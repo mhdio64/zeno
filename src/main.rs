@@ -4,7 +4,7 @@
 //! indexed on demand, and the viewport is repainted after every keystroke.
 
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
@@ -15,27 +15,51 @@ use crossterm::event::{
 };
 use crossterm::execute;
 use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
+use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
-use ratatui::Terminal;
 
 use zeno_cli::clipboard;
+use zeno_cli::config::Config;
 use zeno_cli::doc::edit::Pos;
-use zeno_cli::doc::{identity_of, Doc, Snapshot};
+use zeno_cli::doc::{Doc, Snapshot, identity_of};
 use zeno_cli::highlight::Highlighter;
+use zeno_cli::indent::{self, IndentStyle};
+use zeno_cli::keys::Keymap;
 use zeno_cli::motion::{self, Motion};
+use zeno_cli::panel::{self, Palette};
 use zeno_cli::prompt::{Prompt, Purpose};
-use zeno_cli::render::{View, ViewState};
+use zeno_cli::render::{self, View, ViewState};
 use zeno_cli::search::{MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
-const TAB_WIDTH: usize = 4;
+/// The line-comment prefix for a file, from its extension.
+///
+/// A file type with no line comment — HTML, Markdown, JSON — has no answer,
+/// and the command says so rather than inventing one: `<!-- -->` and `{/* */}`
+/// are not lines a reader would call commented.
+fn line_comment_prefix(path: &Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    Some(match extension.as_str() {
+        "rs" | "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "js" | "mjs" | "cjs" | "jsx" | "ts"
+        | "tsx" | "java" | "go" | "kt" | "kts" | "swift" | "scss" | "less" | "php" | "cs"
+        | "dart" | "zig" | "groovy" | "gradle" => "//",
+        "py" | "pyi" | "rb" | "sh" | "bash" | "zsh" | "fish" | "toml" | "yaml" | "yml" | "ini"
+        | "cfg" | "conf" | "pl" | "pm" | "r" | "jl" | "ps1" | "gitignore" => "#",
+        "sql" | "lua" | "hs" | "elm" | "ada" => "--",
+        "lisp" | "clj" | "cljs" | "el" | "scm" | "asm" | "s" => ";",
+        "vim" => "\"",
+        "erl" | "hrl" => "%",
+        "bat" | "cmd" => "REM",
+        _ => return None,
+    })
+}
 
 /// The most lines one command may edit at once.
 ///
@@ -46,11 +70,7 @@ const TAB_WIDTH: usize = 4;
 const MAX_SPAN_LINES: u64 = 10_000;
 
 /// The answers offered when the file changed on disk under the editor.
-const CHANGED_ON_DISK: &[(char, &'static str)] = &[
-    ('r', "reload"),
-    ('o', "overwrite"),
-    ('c', "cancel"),
-];
+const CHANGED_ON_DISK: &[(char, &str)] = &[('r', "reload"), ('o', "overwrite"), ('c', "cancel")];
 
 /// What the user said to a prompt.
 enum Answer {
@@ -87,7 +107,7 @@ fn chord_letter(code: KeyCode) -> Option<char> {
     }
     #[cfg(windows)]
     {
-        return layout_letter(c);
+        layout_letter(c)
     }
     #[cfg(not(windows))]
     {
@@ -116,24 +136,6 @@ fn layout_letter(c: char) -> Option<char> {
     }
 }
 
-/// Whether this key is the leader.
-///
-/// A legacy terminal sends `Ctrl+Space` as `NUL`, which may reach the editor
-/// as a control-space, as `@`, or as the NUL character itself — and on some
-/// platforms the modifiers are lost along the way. All of those are the
-/// leader; a plain `@` typed with Shift is not.
-fn is_leader(key: &KeyEvent) -> bool {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    match key.code {
-        KeyCode::Char(' ') => ctrl,
-        KeyCode::Char('@') => ctrl,
-        // A terminal that keeps the NUL byte reports it as the NUL character,
-        // or as no key at all, with the modifiers already dropped.
-        KeyCode::Char('\0') | KeyCode::Null => true,
-        _ => false,
-    }
-}
-
 /// The prompt as a widget: the label and the text being typed.
 ///
 /// A search prompt also shows how many matches the pattern has, as soon as
@@ -144,15 +146,15 @@ fn prompt_line(prompt: &Prompt, search: Option<&Search>) -> Paragraph<'static> {
         .bg(Color::Rgb(28, 28, 34))
         .fg(Color::Yellow);
     let mut spans = vec![Span::styled(prompt.line(), style)];
-    if prompt.purpose() == Purpose::Search {
-        if let Some(total) = search.and_then(|search| search.total) {
-            let count = if total == 1 {
-                "1 match".to_string()
-            } else {
-                format!("{total} matches")
-            };
-            spans.push(Span::styled(format!("  {count}"), style));
-        }
+    if prompt.purpose() == Purpose::Search
+        && let Some(total) = search.and_then(|search| search.total)
+    {
+        let count = if total == 1 {
+            "1 match".to_string()
+        } else {
+            format!("{total} matches")
+        };
+        spans.push(Span::styled(format!("  {count}"), style));
     }
     Paragraph::new(Line::from(spans)).style(style)
 }
@@ -162,7 +164,41 @@ fn target_label(target: Target) -> &'static str {
     match target {
         Target::Line => "line",
         Target::Motion(motion) => motion.label(),
+        Target::Object { object, .. } => object.label(),
     }
+}
+
+/// The same range, always running forwards.
+fn ordered(a: Pos, b: Pos) -> (Pos, Pos) {
+    if b < a { (b, a) } else { (a, b) }
+}
+
+/// Whether the text before the cursor opens a block that the next line
+/// belongs inside.
+fn opens_block(before: &str) -> bool {
+    let trimmed = before.trim_end();
+    if trimmed.is_empty() {
+        return false;
+    }
+    // A line that is nothing but the opener is the plainest case, and it is
+    // the one an empty `{` produces.
+    matches!(trimmed.chars().last(), Some('{' | '(' | '[' | ':'))
+}
+
+/// Whether the block the line opens is closed again on the same line — the
+/// empty `()` of a call, which a new line should not go inside.
+fn closes_itself(before: &str, after: Option<char>) -> bool {
+    let trimmed = before.trim_end();
+    let Some(opener) = trimmed.chars().last() else {
+        return false;
+    };
+    let closer = match opener {
+        '{' => '}',
+        '(' => ')',
+        '[' => ']',
+        _ => return false,
+    };
+    after == Some(closer)
 }
 
 fn main() -> ExitCode {
@@ -170,6 +206,8 @@ fn main() -> ExitCode {
     let mut path: Option<PathBuf> = None;
     let mut background_index = true;
     let mut bench_open: Option<PathBuf> = None;
+    let mut force = false;
+    let mut stdin_mode = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -183,6 +221,24 @@ fn main() -> ExitCode {
                 return ExitCode::SUCCESS;
             }
             "--no-background-index" => background_index = false,
+            // `-` is a file name here, not an option: it means the pipe.
+            "-" => stdin_mode = true,
+            "--force" => force = true,
+            // Internal: the child `zeno -` starts so that the keyboard and
+            // the document can come from different places.
+            "--pipe-edit" => {
+                let (Some(spool), Some(result)) = (args.get(i + 1), args.get(i + 2)) else {
+                    eprintln!("zeno: --pipe-edit needs a spool and a result file");
+                    return ExitCode::FAILURE;
+                };
+                return match edit_spooled(Path::new(spool), force, Some(Path::new(result))) {
+                    Ok(_) => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("zeno: {e}");
+                        ExitCode::FAILURE
+                    }
+                };
+            }
             "--bench-open" => {
                 i += 1;
                 match args.get(i) {
@@ -209,13 +265,23 @@ fn main() -> ExitCode {
         return bench_open_frame(&bench_path);
     }
 
+    if stdin_mode {
+        return match run_stdin(force) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("zeno -: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     let Some(path) = path else {
         eprintln!("zeno: no file given");
         print_help();
         return ExitCode::FAILURE;
     };
 
-    match run(&path, background_index) {
+    match run(&path, background_index, force) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("zeno: {}: {e}", path.display());
@@ -229,9 +295,11 @@ fn print_help() {
     println!();
     println!("USAGE:");
     println!("    zeno [OPTIONS] <FILE>");
+    println!("    zeno [OPTIONS] -            read stdin, write the buffer to stdout on exit");
     println!();
     println!("OPTIONS:");
     println!("        --no-background-index   do not scan the whole file in the background");
+    println!("        --force                 open a binary file as raw text");
     println!("        --bench-open <FILE>     open a file, paint one frame, print the time, exit");
     println!("    -h, --help                 print this help");
     println!("    -V, --version              print the version");
@@ -267,17 +335,135 @@ fn bench_open_frame(path: &Path) -> ExitCode {
 }
 
 /// What the editor should do when it is done.
-fn run(path: &Path, background_index: bool) -> Result<(), String> {
+fn run(path: &Path, background_index: bool, force: bool) -> Result<(), String> {
     let doc = Doc::open(path).map_err(|e| e.to_string())?;
-    if doc.looks_binary(8192) {
-        return Err("refusing to open a binary file".into());
+    if doc.looks_binary(8192) && !force {
+        return Err("refusing to open a binary file (--force opens it)".into());
     }
     if background_index {
         let _ = doc.spawn_indexer();
     }
 
     let mut editor = Editor::new(doc, path.to_path_buf());
+    editor.apply_settings(&zeno_cli::config::load());
     editor.run()
+}
+
+/// `zeno -`: read a document from stdin, edit it, write it back to stdout.
+///
+/// The editor works on a real file — the whole model is built on mapping one
+/// — so the pipe is spooled to a temporary file first. The printed text is
+/// what the editor holds at the end, not what came in: an edit that was saved
+/// and one that was not both leave the buffer as the answer (spec §4.1).
+///
+/// A pipe cannot also carry keystrokes, so when stdin is not a terminal the
+/// editing session runs in a child process whose standard input and output
+/// are the terminal itself; the parent waits and prints the buffer the child
+/// left for it. When stdin already is the terminal it is edited here, and
+/// there is nothing to re-open.
+fn run_stdin(force: bool) -> Result<(), String> {
+    use std::io::IsTerminal;
+
+    let mut buffer = Vec::new();
+    io::stdin()
+        .read_to_end(&mut buffer)
+        .map_err(|e| format!("reading stdin: {e}"))?;
+    let directory = std::env::temp_dir();
+    let pid = std::process::id();
+    let spool = directory.join(format!("zeno-stdin-{pid}.txt"));
+    fs::write(&spool, &buffer).map_err(|e| format!("spooling stdin: {e}"))?;
+
+    let edited = if io::stdin().is_terminal() {
+        edit_spooled(&spool, force, None)
+    } else {
+        let result = directory.join(format!("zeno-stdin-{pid}.out"));
+        let _ = fs::remove_file(&result);
+        edit_on_terminal(&spool, &result, force)
+            .and_then(|()| fs::read(&result).map_err(|e| format!("reading the buffer back: {e}")))
+    };
+    let _ = fs::remove_file(&spool);
+    let text = edited?;
+
+    let mut out = io::stdout();
+    out.write_all(&text)
+        .and_then(|()| out.flush())
+        .map_err(|e| format!("writing stdout: {e}"))
+}
+
+/// Edits a spooled document, writing the buffer to `result` when given.
+///
+/// Returns the buffer too, so the in-process case needs no file to read back.
+fn edit_spooled(path: &Path, force: bool, result: Option<&Path>) -> Result<Vec<u8>, String> {
+    let doc = Doc::open(path).map_err(|e| e.to_string())?;
+    if doc.looks_binary(8192) && !force {
+        return Err("refusing to edit a binary stream (--force opens it)".into());
+    }
+    let mut editor = Editor::new(doc, path.to_path_buf());
+    // The spool file is a stand-in, not the user's file: writing it back is
+    // pointless, and saving it must never look like a save of the document.
+    editor.pipe_out = true;
+    editor.apply_settings(&zeno_cli::config::load());
+    editor.run()?;
+    let text = editor.text();
+    if let Some(result) = result {
+        fs::write(result, &text).map_err(|e| format!("writing the buffer back: {e}"))?;
+    }
+    Ok(text.into_bytes())
+}
+
+/// Runs the editing session in a child that owns the terminal.
+///
+/// The child is this same binary with an internal flag, so there is one
+/// editor and not two; only its standard streams differ.
+fn edit_on_terminal(spool: &Path, result: &Path, force: bool) -> Result<(), String> {
+    let (input, output) = terminal_streams()?;
+    let output_copy = output.try_clone().map_err(|e| e.to_string())?;
+    let program = std::env::current_exe().map_err(|e| format!("finding the editor: {e}"))?;
+    let mut command = std::process::Command::new(program);
+    command
+        .arg("--pipe-edit")
+        .arg(spool)
+        .arg(result)
+        .stdin(input)
+        .stdout(output)
+        .stderr(output_copy);
+    if force {
+        command.arg("--force");
+    }
+    let status = command
+        .status()
+        .map_err(|e| format!("starting the editor: {e}"))?;
+    if !status.success() {
+        return Err(format!("the editing session ended with {status}"));
+    }
+    Ok(())
+}
+
+/// A readable and a writable handle on the terminal itself.
+///
+/// Standard input is the pipe here, which is why the terminal has to be
+/// opened by name: `CONIN$`/`CONOUT$` on Windows, `/dev/tty` elsewhere.
+fn terminal_streams() -> Result<(std::fs::File, std::fs::File), String> {
+    #[cfg(windows)]
+    {
+        let input =
+            fs::File::open("CONIN$").map_err(|e| format!("opening the console for input: {e}"))?;
+        let output = fs::File::options()
+            .write(true)
+            .open("CONOUT$")
+            .map_err(|e| format!("opening the console for output: {e}"))?;
+        Ok((input, output))
+    }
+    #[cfg(not(windows))]
+    {
+        let input = fs::File::open("/dev/tty")
+            .map_err(|e| format!("opening the terminal for input: {e}"))?;
+        let output = fs::File::options()
+            .write(true)
+            .open("/dev/tty")
+            .map_err(|e| format!("opening the terminal for output: {e}"))?;
+        Ok((input, output))
+    }
 }
 
 /// Which end of the document to try when a search finds nothing.
@@ -338,6 +524,37 @@ struct Editor {
     search: Option<Search>,
     /// The syntax highlighter. It colours the viewport in the background.
     highlight: Highlighter,
+    /// Named spots the user has remembered (`Leader m a` … `Leader ' a`).
+    marks: std::collections::HashMap<char, Pos>,
+    /// The pattern a replace is about to look for, while it is asking what to
+    /// put in its place.
+    pending_replace: Option<Pattern>,
+    /// Whether an opening bracket or quote brings its partner with it.
+    auto_pair: bool,
+    /// The panel drawn over the viewport, if one is open.
+    overlay: Option<Overlay>,
+    /// Whether the buffer belongs to a pipe and is printed when the editor
+    /// exits, rather than being a file with a name (`zeno -`).
+    pipe_out: bool,
+    /// What one indent level is written as, decided at startup from
+    /// `.editorconfig`, the file's own content, and `zeno.toml`, in that
+    /// order (spec §4.4).
+    indent: IndentStyle,
+    /// Whether the file is written on its own after a moment of quiet.
+    autosave: bool,
+    /// When the last key was handled, for the autosave timer.
+    last_key: std::time::Instant,
+    /// The leader and the chords `zeno.toml` added, on top of the defaults.
+    keys: Keymap,
+}
+
+/// A panel that covers the document while it is open.
+#[derive(Debug, Clone)]
+enum Overlay {
+    /// Every binding, and the operator grammar under it.
+    Help { offset: usize },
+    /// The command palette, with its query.
+    Palette(Palette),
 }
 
 impl Editor {
@@ -359,7 +576,64 @@ impl Editor {
             prompt: None,
             search: None,
             highlight,
+            marks: std::collections::HashMap::new(),
+            pending_replace: None,
+            auto_pair: true,
+            overlay: None,
+            pipe_out: false,
+            indent: indent::DEFAULT,
+            autosave: false,
+            last_key: std::time::Instant::now(),
+            keys: Keymap::default(),
         }
+    }
+
+    /// Applies what `zeno.toml` asked for.
+    ///
+    /// Nothing here can fail: every setting has a default, so a file that
+    /// says only `tab_width = 2` changes only that (spec §6).
+    fn apply_settings(&mut self, config: &Config) {
+        let settings = &config.settings;
+        self.view.word_wrap = settings.word_wrap;
+        self.view.show_line_numbers = settings.line_numbers;
+        self.view.show_relative_numbers = settings.relative_line_numbers;
+        self.indent = indent::resolve(&self.path, &self.doc, settings);
+        self.auto_pair = settings.auto_pair;
+        self.autosave = settings.autosave;
+        self.keys = Keymap::from_config(&config.keys);
+    }
+
+    /// Writes the file after a moment of quiet, when autosave is on.
+    ///
+    /// The wait is what makes it affordable: writing on every keystroke would
+    /// cost the whole file per character. A piped buffer has no file worth
+    /// keeping up to date, so it is never autosaved.
+    fn autosave_if_idle(&mut self) {
+        if !self.autosave || !self.dirty || self.pipe_out {
+            return;
+        }
+        if self.last_key.elapsed() < Duration::from_millis(600) {
+            return;
+        }
+        self.save();
+    }
+
+    /// The whole document, as it would be written to disk.
+    ///
+    /// Reading it costs the whole index, which is why it is only asked for
+    /// when the buffer is about to be printed (`zeno -`).
+    fn text(&mut self) -> String {
+        self.doc.index_fully();
+        let last = self.doc.line_count().saturating_sub(1);
+        let mut text = self
+            .doc
+            .text_in_range(Pos::new(0, 0), Pos::new(last, self.line_len(last)));
+        // The line model does not keep a trailing newline as a line, so the
+        // one property the save path preserves has to be put back here.
+        if self.doc.ends_with_newline() {
+            text.push('\n');
+        }
+        text
     }
 
     fn run(&mut self) -> Result<(), String> {
@@ -372,7 +646,12 @@ impl Editor {
         let result = self.event_loop(&mut terminal);
 
         disable_raw_mode().ok();
-        execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture).ok();
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )
+        .ok();
         terminal.show_cursor().ok();
 
         result
@@ -386,12 +665,17 @@ impl Editor {
         self.flush_system_clipboard().map_err(|e| e.to_string())?;
         while !self.quit {
             if !event::poll(Duration::from_millis(30)).map_err(|e| e.to_string())? {
-                // Nothing happened: the background index may have advanced.
+                // Nothing happened: the background index may have advanced,
+                // and the file may have been quiet long enough to be written.
+                self.autosave_if_idle();
                 self.draw(terminal).map_err(|e| e.to_string())?;
                 continue;
             }
             match event::read().map_err(|e| e.to_string())? {
-                Event::Key(key) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
+                Event::Key(key)
+                    if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
+                {
+                    self.last_key = std::time::Instant::now();
                     self.handle_key(key);
                 }
                 Event::Resize(_, _) => {}
@@ -425,21 +709,54 @@ impl Editor {
             return;
         }
 
+        // A panel owns every key while it is open, for the same reason.
+        if let Some(overlay) = self.overlay.take() {
+            self.handle_overlay_key(overlay, key);
+            return;
+        }
+
         // A pending leader sequence owns the next key, whatever it is.
         if !self.seq.is_idle() {
             self.feed_sequence(key);
             return;
         }
 
-        if is_leader(&key) {
+        if self.keys.is_leader(&key) {
             self.seq.start();
             self.message = "Leader…".into();
             return;
         }
 
+        // A chord `zeno.toml` added is looked at before the built-in ones, so
+        // a config file can move a command without unbinding where it was.
+        if let Some(command) = self.keys.command_for(&key) {
+            self.command(command);
+            return;
+        }
+
+        if let KeyCode::F(1) = key.code {
+            self.open_palette();
+            return;
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if alt && !ctrl {
+            // `Alt+Z` toggles wrapping, the way it does in VSCode. Matched on
+            // the key rather than the character, for the reason in ADR 0010.
+            if let KeyCode::Char('z' | 'Z') = key.code {
+                self.toggle_word_wrap();
+                return;
+            }
+        }
         if ctrl {
+            // `Ctrl+/` arrives as `/` from a console key, and as the control
+            // byte it stands for from a VT-style terminal over a pty.
+            if let KeyCode::Char('/' | '_' | '\u{1f}') = key.code {
+                self.toggle_line_comment();
+                return;
+            }
             match chord_letter(key.code) {
                 // `Ctrl+C` means copy, so it must not quit: `Leader q` quits.
                 Some('a') => {
@@ -468,6 +785,10 @@ impl Editor {
                 }
                 Some('f') => {
                     self.open_find();
+                    return;
+                }
+                Some('h') => {
+                    self.open_replace();
                     return;
                 }
                 Some('g') => {
@@ -575,7 +896,8 @@ impl Editor {
             KeyCode::Enter => self.split_line(),
             KeyCode::Backspace => self.backspace(),
             KeyCode::Delete => self.delete_forward(),
-            KeyCode::Tab => self.insert_text(&" ".repeat(TAB_WIDTH)),
+            KeyCode::Tab => self.insert_text(&self.indent.unit()),
+            KeyCode::BackTab => self.unindent_here(),
             KeyCode::Left => {
                 self.clear_selection();
                 self.move_cursor(-1, 0);
@@ -611,6 +933,12 @@ impl Editor {
             KeyCode::Esc => {
                 self.message.clear();
                 self.clear_selection();
+                // While a search is highlighted, one Esc already closed the
+                // prompt; a second Esc clears the highlight and returns to
+                // ordinary editing.
+                if self.search.is_some() {
+                    self.clear_search();
+                }
             }
             _ => {}
         }
@@ -621,13 +949,23 @@ impl Editor {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let mut submit: Option<Answer> = None;
         let mut cancel = false;
+        let mut escape_leaves_search = false;
         let mut edited = false;
         {
             let Some(prompt) = self.prompt.as_mut() else {
                 return;
             };
             match key.code {
-                KeyCode::Esc => cancel = true,
+                KeyCode::Esc => {
+                    if prompt.purpose() == Purpose::Search {
+                        // The first Esc leaves the prompt open as a
+                        // highlighted search, the way VSCode keeps the
+                        // selection alive after closing the find box.
+                        escape_leaves_search = true;
+                    } else {
+                        cancel = true;
+                    }
+                }
                 KeyCode::Enter if prompt.is_text() => {
                     submit = Some(Answer::Text(prompt.text().to_owned()));
                 }
@@ -656,8 +994,16 @@ impl Editor {
             }
         }
 
+        if escape_leaves_search {
+            // Keep the highlight the prompt just built, and close the
+            // prompt so the document is editable again.
+            self.prompt = None;
+            self.message.clear();
+            return;
+        }
         if cancel {
             self.prompt = None;
+            self.clear_search();
             self.message.clear();
             return;
         }
@@ -711,14 +1057,15 @@ impl Editor {
                         self.message = "not saved".into();
                     }
                     _ => {
-                        self.message = format!("unexpected choice: {c}").into();
+                        self.message = format!("unexpected choice: {c}");
                     }
-                }
-                // A search is answered with text, never with a letter.
-                Purpose::Search => {
+                },
+                // A search or a replacement is answered with text, never
+                // with a letter.
+                Purpose::Search | Purpose::Replace | Purpose::ReplaceWith => {
                     self.message = "unexpected choice".into();
                 }
-            }
+            },
             Answer::Text(text) => match purpose {
                 Purpose::GoToLine => {
                     if let Ok(line) = text.parse::<u64>() {
@@ -728,6 +1075,31 @@ impl Editor {
                     } else {
                         self.message = "not a line number".into();
                     }
+                }
+                Purpose::Replace => {
+                    if text.is_empty() {
+                        self.message = "nothing to replace".into();
+                        return;
+                    }
+                    match Pattern::compile(&text) {
+                        Ok(pattern) => {
+                            // The pattern is remembered twice: as what the
+                            // viewport highlights while the answer is typed,
+                            // and as the thing this replace will look for.
+                            self.set_pattern(pattern.clone());
+                            self.pending_replace = Some(pattern);
+                            self.prompt = Some(Prompt::input(Purpose::ReplaceWith));
+                            self.message.clear();
+                        }
+                        Err(message) => self.message = message,
+                    }
+                }
+                Purpose::ReplaceWith => {
+                    let Some(pattern) = self.pending_replace.take() else {
+                        self.message = "nothing to replace".into();
+                        return;
+                    };
+                    self.replace_all(&pattern, &text);
                 }
                 Purpose::Search => {
                     if text.is_empty() {
@@ -752,9 +1124,9 @@ impl Editor {
                     self.start_scan(scope, Some(Wrap::Start));
                 }
                 _ => {
-                    self.message = format!("unexpected text: {text}").into();
+                    self.message = format!("unexpected text: {text}");
                 }
-            }
+            },
         }
     }
 
@@ -842,7 +1214,7 @@ impl Editor {
         // Pressing the leader again keeps the sequence open; any other chord
         // abandons it. `Char('s')` with Control is `Ctrl+S`, not the `s`
         // mnemonic, and must not save behind the user's back.
-        if is_leader(&key) {
+        if self.keys.is_leader(&key) {
             return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -886,6 +1258,25 @@ impl Editor {
                 target,
                 count,
             } => self.apply_operator(operator, target, count),
+            Action::SetMark(name) => {
+                self.marks.insert(name, self.cursor());
+                let pos = self.cursor();
+                self.message = format!("mark '{name}' at {}:{}", pos.line + 1, pos.col + 1);
+            }
+            Action::JumpToMark(name) => match self.marks.get(&name).copied() {
+                Some(pos) => {
+                    // The document may have lost lines since the mark was
+                    // set; a mark past the end lands on the last line.
+                    let last = self.doc.line_count().saturating_sub(1);
+                    let line = pos.line.min(last);
+                    let col = pos.col.min(self.line_len(line));
+                    self.clear_selection();
+                    self.move_to(Pos::new(line, col));
+                    self.ensure_cursor_visible();
+                    self.message.clear();
+                }
+                None => self.message = format!("no mark '{name}'"),
+            },
         }
     }
 
@@ -906,40 +1297,138 @@ impl Editor {
                 self.view.show_line_numbers = !self.view.show_line_numbers;
                 self.message.clear();
             }
+            Command::ToggleRelativeGutter => {
+                self.view.show_relative_numbers = !self.view.show_relative_numbers;
+                self.message.clear();
+            }
+            Command::ToggleWordWrap => self.toggle_word_wrap(),
+            Command::IndentLine => {
+                let line = self.view.cursor_line;
+                let end = Pos::new(line, self.line_len(line));
+                self.reindent(Pos::new(line, 0), end, true);
+            }
+            Command::UnindentLine => {
+                let line = self.view.cursor_line;
+                let end = Pos::new(line, self.line_len(line));
+                self.reindent(Pos::new(line, 0), end, false);
+            }
             Command::GoToLine => self.open_prompt(Purpose::GoToLine),
             Command::Find => self.open_find(),
+            Command::Replace => self.open_replace(),
             Command::NextMatch => self.next_match(),
             Command::PreviousMatch => self.previous_match(),
+            Command::ToggleLineComment => self.toggle_line_comment(),
+            Command::Help => self.open_help(),
+            Command::Palette => self.open_palette(),
         }
+    }
+
+    /// `Leader ?`: the help list, drawn over the viewport.
+    fn open_help(&mut self) {
+        self.overlay = Some(Overlay::Help { offset: 0 });
+        self.message.clear();
+    }
+
+    /// `F1` and `Leader p`: every command, filtered by what is typed.
+    fn open_palette(&mut self) {
+        self.overlay = Some(Overlay::Palette(Palette::new()));
+        self.message.clear();
+    }
+
+    /// Routes one key into an open panel.
+    ///
+    /// The panel owns the keyboard while it is open, the way the prompt does:
+    /// a key that means `undo` in the document means `u` in the palette's
+    /// query. Nothing edits the file until the panel is closed and a command
+    /// is chosen.
+    fn handle_overlay_key(&mut self, mut overlay: Overlay, key: KeyEvent) {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let height = self.viewport_height() as usize;
+        let closes = match (&overlay, key.code) {
+            (_, KeyCode::Esc) => true,
+            // The help list is read, not edited: any of its own keys closes
+            // it, so it never becomes a mode to escape from.
+            (Overlay::Help { .. }, KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?')) => {
+                true
+            }
+            _ => false,
+        };
+        if closes {
+            self.message.clear();
+            return;
+        }
+        match &mut overlay {
+            Overlay::Help { offset } => match key.code {
+                KeyCode::Down => {
+                    *offset = (*offset + 1).min(panel::help_height().saturating_sub(1))
+                }
+                KeyCode::Up => *offset = offset.saturating_sub(1),
+                KeyCode::PageDown => {
+                    *offset = (*offset + height).min(panel::help_height().saturating_sub(1));
+                }
+                KeyCode::PageUp => *offset = offset.saturating_sub(height),
+                _ => {}
+            },
+            Overlay::Palette(palette) => match key.code {
+                KeyCode::Enter => {
+                    if let Some(entry) = palette.selected() {
+                        self.message.clear();
+                        self.command(entry.command);
+                        return;
+                    }
+                }
+                KeyCode::Down => palette.down(),
+                KeyCode::Up => palette.up(),
+                KeyCode::Backspace => palette.backspace(),
+                KeyCode::Char(c) if !ctrl => palette.insert(c),
+                _ => {}
+            },
+        }
+        // An unknown key leaves the panel open rather than closing it: a
+        // stray keystroke should not throw away what was typed.
+        self.overlay = Some(overlay);
     }
 
     /// Resolves an operator against the range its target names, then acts on it.
     fn apply_operator(&mut self, operator: Operator, target: Target, count: u32) {
         let from = self.cursor();
-        let to = match target {
+        let (start, end) = match target {
+            // A text object is a range in its own right: it is not measured
+            // from the cursor, it contains it.
+            Target::Object { object, around } => {
+                match motion::object_range(&self.doc, from, object, around, count) {
+                    Some(range) => range,
+                    None => {
+                        let where_ = if around { "around" } else { "inside" };
+                        self.message = format!("no {} {} the cursor", object.label(), where_);
+                        return;
+                    }
+                }
+            }
             Target::Line => {
                 let last = self.doc.line_count().saturating_sub(1);
                 let end_line = from.line.saturating_add(count as u64);
-                if end_line > last {
+                let to = if end_line > last {
                     Pos::new(last, self.line_len(last))
                 } else {
                     Pos::new(end_line, 0)
-                }
+                };
+                ordered(from, to)
             }
             Target::Motion(motion) => {
                 let mut to = from;
                 for _ in 0..count.max(1) {
                     to = motion::target(&self.doc, to, motion);
                 }
-                to
+                ordered(from, to)
             }
         };
-        let (start, end) = if to < from { (to, from) } else { (from, to) };
 
         // `v` names a range but changes nothing: it just moves the anchor.
         if operator == Operator::Select {
-            self.view.anchor = Some(from);
-            self.move_to(to);
+            self.view.anchor = Some(start);
+            self.move_to(end);
+            self.clamp_column();
             self.ensure_cursor_visible();
             self.message.clear();
             return;
@@ -980,7 +1469,186 @@ impl Editor {
                 self.message = format!("{verb} {chars} chars");
             }
             Operator::Select => unreachable!("handled before the match"),
+            Operator::Indent => self.reindent(start, end, true),
+            Operator::Unindent => self.reindent(start, end, false),
         }
+    }
+
+    /// Turns soft wrapping on or off.
+    ///
+    /// Wrapping is a layout choice, not an edit: the document does not move,
+    /// the horizontal scroll is simply ignored while it is on, and off again
+    /// as soon as it is off.
+    fn toggle_word_wrap(&mut self) {
+        self.view.word_wrap = !self.view.word_wrap;
+        self.view.top_row = 0;
+        self.message = if self.view.word_wrap {
+            "word wrap on".into()
+        } else {
+            "word wrap off".into()
+        };
+        self.ensure_cursor_visible();
+    }
+
+    /// `Ctrl+/`: comments out the touched lines, or uncomments them.
+    ///
+    /// The rule is the one VSCode uses: if every line that carries text is
+    /// already commented, the command uncomments; otherwise it comments the
+    /// lines that are not. Blank lines are left alone either way, because a
+    /// comment marker on an empty line is noise nobody asked for.
+    ///
+    /// The whole range is one [`Doc::edit`], so the command is one undo step
+    /// however many lines it covers (spec §4.7).
+    fn toggle_line_comment(&mut self) {
+        let Some(prefix) = line_comment_prefix(&self.path) else {
+            self.message = "this file type has no line comment".into();
+            return;
+        };
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        let first = from.line;
+        let last = if to.col == 0 && to.line > first {
+            to.line - 1
+        } else {
+            to.line
+        };
+
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        let original = self.doc.text_in_range(range_start, range_end);
+        let lines: Vec<&str> = original.split('\n').collect();
+        let commented = lines
+            .iter()
+            .filter(|line| !line.trim().is_empty())
+            .all(|line| line.trim_start().starts_with(prefix));
+
+        let cursor_line = self.view.cursor_line;
+        let mut changed = String::with_capacity(original.len() + lines.len() * (prefix.len() + 1));
+        let mut cursor_delta: i64 = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if index > 0 {
+                changed.push('\n');
+            }
+            let indent = line.len() - line.trim_start().len();
+            let is_cursor_line = first + index as u64 == cursor_line;
+            if commented {
+                let rest = &line[indent..];
+                let stripped = rest.strip_prefix(prefix).unwrap_or(rest);
+                let stripped = stripped.strip_prefix(' ').unwrap_or(stripped);
+                if is_cursor_line {
+                    let removed = line.chars().count() - indent - stripped.chars().count();
+                    cursor_delta = -(removed as i64);
+                }
+                changed.push_str(&line[..indent]);
+                changed.push_str(stripped);
+                continue;
+            }
+            if line.trim().is_empty() {
+                changed.push_str(line);
+                continue;
+            }
+            let marker = format!("{prefix} ");
+            if is_cursor_line {
+                let width = marker.chars().count();
+                if self.view.cursor_col >= indent {
+                    cursor_delta = width as i64;
+                }
+            }
+            changed.push_str(&line[..indent]);
+            changed.push_str(&marker);
+            changed.push_str(&line[indent..]);
+        }
+
+        if changed == original {
+            self.message = if commented {
+                "nothing to uncomment".into()
+            } else {
+                "nothing to comment".into()
+            };
+            return;
+        }
+        self.doc.edit(range_start, range_end, &changed);
+        self.dirty = true;
+        let col = self.view.cursor_col as i64 + cursor_delta;
+        self.view.cursor_col = col.max(0) as usize;
+        self.clamp_column();
+        let count = last - first + 1;
+        let verb = if commented {
+            "uncommented"
+        } else {
+            "commented"
+        };
+        self.message = format!(
+            "{verb} {count} {}",
+            if count == 1 { "line" } else { "lines" }
+        );
+    }
+
+    /// Adds or removes one indent level on every line a range touches.
+    ///
+    /// The whole range is rewritten as a single [`Doc::edit`], so the
+    /// command is one undo step however many lines it covers — the journal
+    /// groups a command, not its lines (spec §4.7).
+    ///
+    /// The range is half-open, like every other: it stops before
+    /// `(end.line, end.col)`, so a target at column 0 does not touch its own
+    /// line, which is what makes `Leader > j` agree with `Leader d j` about
+    /// which lines they name.
+    fn reindent(&mut self, from: Pos, to: Pos, indent: bool) {
+        let last_line = self.doc.line_count().saturating_sub(1);
+        let (start, end) = if to < from { (to, from) } else { (from, to) };
+        let first = start.line.min(last_line);
+        let last = if end.col == 0 && end.line > first {
+            (end.line - 1).min(last_line)
+        } else {
+            end.line.min(last_line)
+        };
+
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        let original = self.doc.text_in_range(range_start, range_end);
+        let cursor_line = self.view.cursor_line;
+        let cursor_touched = (first..=last).contains(&cursor_line);
+
+        let mut changed = String::with_capacity(original.len() + self.indent.width());
+        let mut cursor_removed = 0usize;
+        for (i, line) in original.split('\n').enumerate() {
+            if i > 0 {
+                changed.push('\n');
+            }
+            if indent {
+                changed.push_str(&self.indent.unit());
+                changed.push_str(line);
+            } else {
+                let (kept, removed) = indent::dedent(line, self.indent);
+                if first + i as u64 == cursor_line {
+                    cursor_removed = removed;
+                }
+                changed.push_str(kept);
+            }
+        }
+
+        if changed == original {
+            self.message = "nothing to unindent".into();
+            return;
+        }
+        self.doc.edit(range_start, range_end, &changed);
+        self.dirty = true;
+        // The cursor stays on the character it was on: the text moved
+        // under it, so it moves with the text.
+        if cursor_touched {
+            if indent {
+                self.view.cursor_col += self.indent.width();
+            } else {
+                self.view.cursor_col = self.view.cursor_col.saturating_sub(cursor_removed);
+            }
+            self.clamp_column();
+        }
+        let count = last - first + 1;
+        let verb = if indent { "indented" } else { "unindented" };
+        self.message = format!(
+            "{verb} {count} {}",
+            if count == 1 { "line" } else { "lines" }
+        );
     }
 
     fn paste(&mut self) {
@@ -1121,7 +1789,6 @@ impl Editor {
         self.line_text(line).chars().count()
     }
 
-
     /// The cursor as a document position.
     fn cursor(&self) -> Pos {
         Pos::new(self.view.cursor_line, self.view.cursor_col)
@@ -1159,15 +1826,129 @@ impl Editor {
     }
 
     fn insert_char(&mut self, c: char) {
+        // Typing the closing half of a pair that is already there steps over
+        // it instead of doubling it, which is what the hands expect before
+        // they have looked at what is next.
+        if self.step_over(c) {
+            return;
+        }
+        // A closer at the start of an indented line belongs one level out.
+        self.close_block_indent(c);
+        if let Some(close) = self.partner_for(c) {
+            let start = self.cursor();
+            self.insert_replacing_selection(&format!("{c}{close}"));
+            // Back between the two, where the next character belongs.
+            self.view.cursor_col = start.col + 1;
+            self.clamp_column();
+            return;
+        }
         self.insert_replacing_selection(&c.to_string());
+    }
+
+    /// The character that would complete the pair `c` opens, if it is
+    /// unambiguous that one is wanted (spec §4.9).
+    ///
+    /// Nothing is paired over a selection (typing replaces it), next to a word
+    /// or a closer (there the user is editing text, not opening a block), or
+    /// for a quote between two letters, which is an apostrophe.
+    fn partner_for(&self, c: char) -> Option<char> {
+        if !self.auto_pair || self.selection().is_some() {
+            return None;
+        }
+        let close = match c {
+            '(' => ')',
+            '[' => ']',
+            '{' => '}',
+            '"' | '\'' | '`' => c,
+            _ => return None,
+        };
+        let pos = self.cursor();
+        let text = self.line_text(pos.line);
+        let next = text.chars().nth(pos.col);
+        let previous = pos.col.checked_sub(1).and_then(|col| text.chars().nth(col));
+        if next.is_some_and(|n| n.is_alphanumeric() || n == '_') {
+            return None;
+        }
+        if close == c
+            && previous.is_some_and(|p| p.is_alphanumeric())
+            && next.is_some_and(|n| n.is_alphanumeric())
+        {
+            return None;
+        }
+        Some(close)
+    }
+
+    /// Whether `c` is a closer that is already under the cursor.
+    fn step_over(&mut self, c: char) -> bool {
+        if !matches!(c, ')' | ']' | '}' | '"' | '\'' | '`') || self.selection().is_some() {
+            return false;
+        }
+        let pos = self.cursor();
+        if self.line_text(pos.line).chars().nth(pos.col) == Some(c) {
+            self.view.cursor_col += 1;
+            self.ensure_cursor_visible();
+            return true;
+        }
+        false
     }
 
     fn insert_text(&mut self, text: &str) {
         self.insert_replacing_selection(text);
     }
 
+    /// `Enter`, with the indentation a new line should start with.
+    ///
+    /// A new line keeps the indentation of the line it came from, and takes
+    /// one more level when the line before it opens a block — which is what
+    /// `{`, `(`, `[` and `:` say in every language this editor will meet
+    /// (spec §4.4). It does not indent between a pair that is already there: a
+    /// closer waiting on the next line is a block that stays where it is.
     fn split_line(&mut self) {
-        self.insert_replacing_selection("\n");
+        let current = self.line_text(self.view.cursor_line);
+        let before_cursor = current.chars().take(self.view.cursor_col).count();
+        let before: String = current.chars().take(before_cursor).collect();
+        let after: Option<char> = current.chars().nth(self.view.cursor_col);
+
+        let base = indent::leading(&current).to_owned();
+        let opens = opens_block(&before) && !closes_itself(&before, after);
+        let extra = if opens {
+            self.indent.unit()
+        } else {
+            String::new()
+        };
+        self.insert_replacing_selection(&format!("\n{base}{extra}"));
+    }
+
+    /// `Shift+Tab`: one level back, on every line the range touches.
+    fn unindent_here(&mut self) {
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        self.reindent(from, to, false);
+    }
+
+    /// Removes one level of the cursor's line when a closer is typed at the
+    /// start of it, so `}` lands level with the `{` it closes.
+    fn close_block_indent(&mut self, c: char) -> bool {
+        if !matches!(c, '}' | ')' | ']') {
+            return false;
+        }
+        let text = self.line_text(self.view.cursor_line);
+        let before: String = text.chars().take(self.view.cursor_col).collect();
+        if !before.chars().all(char::is_whitespace) || before.is_empty() {
+            return false;
+        }
+        let Some((kept, removed)) = Some(indent::dedent(&text, self.indent)) else {
+            return false;
+        };
+        if removed == 0 {
+            return false;
+        }
+        let line = self.view.cursor_line;
+        let start = Pos::new(line, 0);
+        let end = Pos::new(line, self.line_len(line));
+        self.doc.edit(start, end, kept);
+        self.view.cursor_col = self.view.cursor_col.saturating_sub(removed);
+        self.dirty = true;
+        true
     }
 
     fn backspace(&mut self) {
@@ -1176,7 +1957,27 @@ impl Editor {
         }
         let pos = self.cursor();
         if pos.col > 0 {
+            let text = self.line_text(pos.line);
+            let before = text.chars().nth(pos.col - 1);
+            let after = text.chars().nth(pos.col);
+            // Backspacing an empty pair takes both halves: the pair was one
+            // keystroke, so removing it is one.
+            let empty_pair = matches!(
+                (before, after),
+                (Some('('), Some(')'))
+                    | (Some('['), Some(']'))
+                    | (Some('{'), Some('}'))
+                    | (Some('"'), Some('"'))
+                    | (Some('\''), Some('\''))
+                    | (Some('`'), Some('`'))
+            ) && self.auto_pair;
             let start = Pos::new(pos.line, pos.col - 1);
+            if empty_pair {
+                self.doc.edit(start, Pos::new(pos.line, pos.col + 1), "");
+                self.move_to(start);
+                self.dirty = true;
+                return;
+            }
             self.doc.edit(start, pos, "");
             self.move_to(start);
             self.dirty = true;
@@ -1249,6 +2050,12 @@ impl Editor {
     // ----- movement ------------------------------------------------------
 
     fn move_cursor(&mut self, dx: i32, dy: i32) {
+        // Wrapped, a vertical movement means one *screen* row, which is what
+        // the eye follows; unwrapped, it means one line (spec §4.5).
+        if dy != 0 && self.view.word_wrap {
+            self.move_cursor_wrapped(dy);
+            return;
+        }
         if dy != 0 {
             let last = self.doc.line_count().saturating_sub(1);
             let target = (self.view.cursor_line as i64 + dy as i64).clamp(0, last as i64) as u64;
@@ -1260,6 +2067,42 @@ impl Editor {
             let len = text.chars().count();
             let target = (self.view.cursor_col as i64 + dx as i64).clamp(0, len as i64) as usize;
             self.view.cursor_col = target;
+        }
+        self.ensure_cursor_visible();
+    }
+
+    /// One visual row up or down, keeping the column within the row.
+    ///
+    /// A row that ends early clamps to its end, which is the same rule the
+    /// unwrapped move uses for a short line.
+    fn move_cursor_wrapped(&mut self, dy: i32) {
+        let width = self.view.width.max(1) as usize;
+        let chars: Vec<char> = self.line_text(self.view.cursor_line).chars().collect();
+        let (row, column) = render::wrapped_position(&chars, width, self.view.cursor_col);
+        if dy < 0 {
+            if row > 0 {
+                let start = render::wrapped_row_start(&chars, width, row - 1);
+                self.view.cursor_col = start + column;
+            } else if self.view.cursor_line > 0 {
+                let previous = self.view.cursor_line - 1;
+                let previous_chars: Vec<char> = self.line_text(previous).chars().collect();
+                let rows = render::wrapped_row_count(&previous_chars, width);
+                let start = render::wrapped_row_start(&previous_chars, width, rows - 1);
+                self.view.cursor_line = previous;
+                let len = previous_chars.len();
+                self.view.cursor_col = (start + column).min(len);
+            }
+        } else {
+            let rows = render::wrapped_row_count(&chars, width);
+            if row + 1 < rows {
+                let start = render::wrapped_row_start(&chars, width, row + 1);
+                self.view.cursor_col = (start + column).min(chars.len());
+            } else if self.doc.line_text(self.view.cursor_line + 1).is_some() {
+                self.view.cursor_line += 1;
+                let next: Vec<char> = self.line_text(self.view.cursor_line).chars().collect();
+                let start = render::wrapped_row_start(&next, width, 0);
+                self.view.cursor_col = (start + column).min(next.len());
+            }
         }
         self.ensure_cursor_visible();
     }
@@ -1308,6 +2151,11 @@ impl Editor {
     }
 
     fn ensure_cursor_visible(&mut self) {
+        if self.view.word_wrap {
+            self.ensure_cursor_visible_wrapped();
+            return;
+        }
+        self.view.top_row = 0;
         let height = self.viewport_height() as u64;
         if self.view.cursor_line < self.view.top_line {
             self.view.top_line = self.view.cursor_line;
@@ -1328,6 +2176,76 @@ impl Editor {
         }
     }
 
+    /// Brings the cursor on screen when lines wrap.
+    ///
+    /// The unit is a screen row, not a line, because a wrapped line can be
+    /// taller than the viewport: `top_row` says where inside the top line the
+    /// viewport starts, and the check is always "how many rows is the cursor
+    /// from there".
+    fn ensure_cursor_visible_wrapped(&mut self) {
+        let height = self.viewport_height() as usize;
+        let width = self.view.width.max(1) as usize;
+        let chars: Vec<char> = self.line_text(self.view.cursor_line).chars().collect();
+        let (cursor_row, _) = render::wrapped_position(&chars, width, self.view.cursor_col);
+
+        // Above the top of the viewport: scroll up to it.
+        if self.view.cursor_line < self.view.top_line
+            || (self.view.cursor_line == self.view.top_line && cursor_row < self.view.top_row)
+        {
+            self.view.top_line = self.view.cursor_line;
+            self.view.top_row = cursor_row;
+            return;
+        }
+
+        // A screen row per line is the best case, so a cursor this many lines
+        // below the top cannot be on screen however the rows lay out.
+        let rows_available = height.max(1) as u64;
+        if self.view.cursor_line.saturating_sub(self.view.top_line) >= rows_available {
+            self.view.top_line = self.view.cursor_line + 1 - rows_available;
+            self.view.top_row = 0;
+        }
+
+        // Now walk the top of the viewport forward until the cursor's row
+        // fits. The line gap is already under the height, so this is bounded
+        // by the height of the screen rather than by the size of the file.
+        let mut guard = 0usize;
+        while self.wrapped_distance(width, cursor_row) >= height.max(1) {
+            self.view.top_row += 1;
+            let top_chars: Vec<char> = self.line_text(self.view.top_line).chars().collect();
+            if self.view.top_row >= render::wrapped_row_count(&top_chars, width) {
+                if self.view.top_line >= self.view.cursor_line {
+                    // One line taller than the screen: the cursor cannot be
+                    // brought all the way in, so show the line from its top.
+                    self.view.top_row = 0;
+                    break;
+                }
+                self.view.top_line += 1;
+                self.view.top_row = 0;
+            }
+            guard += 1;
+            if guard > height * 4 {
+                self.view.top_line = self.view.cursor_line;
+                self.view.top_row = 0;
+                break;
+            }
+        }
+    }
+
+    /// How many screen rows the cursor is below the top of the viewport.
+    fn wrapped_distance(&self, width: usize, cursor_row: usize) -> usize {
+        let mut rows = 0usize;
+        let mut line = self.view.top_line;
+        while line < self.view.cursor_line {
+            let chars: Vec<char> = self.line_text(line).chars().collect();
+            rows += render::wrapped_row_count(&chars, width);
+            line += 1;
+        }
+        // `top_row` is where inside `top_line` the viewport starts, so it
+        // comes off the whole count, including when the cursor is on that
+        // same line.
+        (rows + cursor_row).saturating_sub(self.view.top_row)
+    }
+
     // ----- searching -----------------------------------------------------
 
     /// `Ctrl+F` and `Leader f`: ask for a pattern.
@@ -1342,6 +2260,75 @@ impl Editor {
             .unwrap_or_default();
         self.prompt = Some(Prompt::with_text(Purpose::Search, &previous));
         self.message.clear();
+    }
+
+    /// `Ctrl+H` and `Leader r`: ask what to look for, then what to put there.
+    ///
+    /// The pattern comes first because it is the answer with a history: the
+    /// prompt starts with the last pattern, so replacing what was just found
+    /// is one `Enter` rather than a retype.
+    fn open_replace(&mut self) {
+        let previous = self
+            .search
+            .as_ref()
+            .map(|search| search.pattern.source().to_owned())
+            .unwrap_or_default();
+        self.pending_replace = None;
+        self.prompt = Some(Prompt::with_text(Purpose::Replace, &previous));
+        self.message.clear();
+    }
+
+    /// Replaces every match of `pattern` with `replacement`.
+    ///
+    /// The range is the selection if there is one and the whole file
+    /// otherwise, and a range wider than one command may edit is refused with
+    /// a message, like every other bulk command (ADR 0012). The whole range is
+    /// rewritten as one [`Doc::edit`], so replace-all is one undo step.
+    fn replace_all(&mut self, pattern: &Pattern, replacement: &str) {
+        let (start, end) = match self.selection() {
+            Some(range) => range,
+            None => {
+                // Replacing across a file needs to know where the file ends,
+                // which is the one question that costs a full scan.
+                self.doc.index_fully();
+                let last = self.doc.line_count().saturating_sub(1);
+                (Pos::new(0, 0), Pos::new(last, self.line_len(last)))
+            }
+        };
+        if !self.range_is_affordable(start, end) {
+            self.message = self.too_large(start, end);
+            return;
+        }
+        let text = self.doc.text_in_range(start, end);
+        let matches = pattern.find_in(&text);
+        if matches.is_empty() {
+            self.message = format!("no match for {}", pattern.source());
+            return;
+        }
+        let chars: Vec<char> = text.chars().collect();
+        let mut replaced = String::with_capacity(text.len());
+        let mut at = 0usize;
+        for (from, to) in &matches {
+            if *from < at {
+                continue;
+            }
+            replaced.extend(&chars[at..*from]);
+            replaced.push_str(replacement);
+            at = *to;
+        }
+        replaced.extend(&chars[at..]);
+
+        let count = matches.len();
+        self.doc.edit(start, end, &replaced);
+        self.view.anchor = None;
+        self.dirty = true;
+        self.move_to(start);
+        self.clamp_column();
+        self.ensure_cursor_visible();
+        self.message = format!(
+            "replaced {count} {}",
+            if count == 1 { "match" } else { "matches" }
+        );
     }
 
     /// Forgets the search and the highlight that goes with it.
@@ -1359,7 +2346,7 @@ impl Editor {
         let Some(prompt) = self.prompt.as_ref() else {
             return;
         };
-        if prompt.purpose() != Purpose::Search {
+        if !matches!(prompt.purpose(), Purpose::Search | Purpose::Replace) {
             return;
         }
         let source = prompt.text().to_owned();
@@ -1581,12 +2568,12 @@ impl Editor {
     /// because the mapping is read-only but not protected from truncation, it
     /// is also how it can read past the end of a file that shrank.
     fn save(&mut self) {
-        if let Ok(current) = identity_of(&self.path) {
-            if current != self.doc.identity() {
-                self.prompt = Some(Prompt::choice(Purpose::ChangedOnDisk, CHANGED_ON_DISK));
-                self.message.clear();
-                return;
-            }
+        if let Ok(current) = identity_of(&self.path)
+            && current != self.doc.identity()
+        {
+            self.prompt = Some(Prompt::choice(Purpose::ChangedOnDisk, CHANGED_ON_DISK));
+            self.message.clear();
+            return;
         }
         self.write_now();
     }
@@ -1648,7 +2635,8 @@ impl Editor {
             let text = self.doc.line_text(line).unwrap_or_default();
             out.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
             if line + 1 < count || trailing {
-                out.write_all(ending.as_str().as_bytes()).map_err(|e| e.to_string())?;
+                out.write_all(ending.as_str().as_bytes())
+                    .map_err(|e| e.to_string())?;
             }
         }
         out.flush().map_err(|e| e.to_string())?;
@@ -1665,10 +2653,7 @@ impl Editor {
 
     // ----- drawing -------------------------------------------------------
 
-    fn draw(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    ) -> io::Result<()> {
+    fn draw(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
         // Whatever the background scans have finished is applied before the
         // frame is painted, so a match that was found is shown where it is.
         self.poll_search();
@@ -1700,13 +2685,32 @@ impl Editor {
         self.poll_highlight(body.height);
 
         terminal.draw(|f| {
-            let view = View {
-                doc: &self.doc,
-                state: &self.view,
-                highlight: Some(self.highlight.lines()),
+            // A panel covers the document rather than sharing the screen with
+            // it: the list is the thing being read, so it gets the room.
+            let cursor = match &self.overlay {
+                Some(overlay) => {
+                    let lines = match overlay {
+                        Overlay::Help { offset } => {
+                            panel::help_lines(*offset, body.height as usize)
+                        }
+                        Overlay::Palette(palette) => {
+                            panel::palette_lines(palette, body.height as usize)
+                        }
+                    };
+                    f.render_widget(Paragraph::new(Text::from(lines)), body);
+                    None
+                }
+                None => {
+                    let view = View {
+                        doc: &self.doc,
+                        state: &self.view,
+                        highlight: Some(self.highlight.lines()),
+                    };
+                    let cursor = view.cursor_position(body);
+                    f.render_widget(view, body);
+                    cursor
+                }
             };
-            let cursor = view.cursor_position(body);
-            f.render_widget(view, body);
             match &self.prompt {
                 // The question replaces the status line, so the document area
                 // keeps its size and nothing on screen moves.
@@ -1741,10 +2745,7 @@ impl Editor {
             Style::default().add_modifier(Modifier::BOLD),
         ));
         if self.dirty {
-            spans.push(Span::styled(
-                " [+]",
-                Style::default().fg(Color::Yellow),
-            ));
+            spans.push(Span::styled(" [+]", Style::default().fg(Color::Yellow)));
         }
         spans.push(Span::raw("  "));
         spans.push(Span::raw(format!("Ln {}", self.view.cursor_line + 1)));
@@ -1962,7 +2963,10 @@ mod tests {
 
     #[test]
     fn a_sequence_of_keys_produces_the_expected_document() {
-        let (mut e, _p) = editor_with("sequence.txt", b"fn main() {\n    x();\n}\n\n// c\nlet y = 1;\n");
+        let (mut e, _p) = editor_with(
+            "sequence.txt",
+            b"fn main() {\n    x();\n}\n\n// c\nlet y = 1;\n",
+        );
         for k in [
             key(KeyCode::Char('X')),
             key(KeyCode::Char('Y')),
@@ -2117,7 +3121,7 @@ mod tests {
             kind: KeyEventKind::Press,
             state: crossterm::event::KeyEventState::NONE,
         };
-        assert!(is_leader(&leader));
+        assert!(Keymap::default().is_leader(&leader));
         e.handle_key(leader);
         assert!(!e.seq.is_idle());
         assert_eq!(e.message, "Leader…");
@@ -2179,7 +3183,10 @@ mod tests {
         sequence(&mut e, "dw");
         e.handle_key(chord(KeyCode::Char('\u{1a}')));
         assert_eq!(line(&e, 0), "alpha beta");
-        assert_eq!(e.view.cursor_col, 0, "undo returns to where the range began");
+        assert_eq!(
+            e.view.cursor_col, 0,
+            "undo returns to where the range began"
+        );
     }
 
     #[test]
@@ -2221,6 +3228,236 @@ mod tests {
         assert!(!e.view.show_line_numbers);
         sequence(&mut e, ",");
         assert!(e.view.show_line_numbers);
+    }
+
+    #[test]
+    fn a_mark_remembers_a_spot_and_returns_to_it() {
+        let (mut e, _p) = editor_with("mark.txt", b"one\ntwo\nthree\n");
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 1;
+        sequence(&mut e, "ma");
+        assert!(e.marks.contains_key(&'a'), "the mark is stored");
+
+        // Walk away, then come back.
+        e.move_to(Pos::new(0, 0));
+        sequence(&mut e, "'a");
+        assert_eq!(e.view.cursor_line, 2, "back on the marked line");
+        assert_eq!(e.view.cursor_col, 1, "at the marked column");
+    }
+
+    #[test]
+    fn jumping_to_an_unset_mark_says_so_and_stays_put() {
+        let (mut e, _p) = editor_with("mark-none.txt", b"one\n");
+        sequence(&mut e, "'x");
+        assert_eq!(e.message, "no mark 'x'");
+        assert_eq!(e.view.cursor_line, 0, "the cursor did not move");
+    }
+
+    #[test]
+    fn leader_bracket_indents_and_unindents_the_line() {
+        let (mut e, _p) = editor_with("indent.txt", b"ab\ncd\n");
+        e.view.cursor_col = 1;
+        sequence(&mut e, "]");
+        assert_eq!(line(&e, 0), "    ab");
+        assert_eq!(e.view.cursor_col, 5, "the cursor moved with the text");
+        assert!(e.dirty);
+
+        sequence(&mut e, "[");
+        assert_eq!(line(&e, 0), "ab", "one level comes off");
+        assert_eq!(e.view.cursor_col, 1);
+    }
+
+    #[test]
+    fn unindent_takes_only_what_was_there() {
+        let (mut e, _p) = editor_with("indent-partial.txt", b"  ab\n");
+        sequence(&mut e, "[");
+        assert_eq!(line(&e, 0), "ab", "two spaces, not four");
+        sequence(&mut e, "[");
+        assert_eq!(line(&e, 0), "ab", "already at the margin");
+        assert_eq!(e.message, "nothing to unindent");
+        assert_eq!(e.doc.history().undo_depth(), 1, "the no-op added no edit");
+    }
+
+    #[test]
+    fn unindent_removes_a_leading_tab_too() {
+        let (mut e, _p) = editor_with("indent-tab.txt", b"\tab\n");
+        sequence(&mut e, "[");
+        assert_eq!(line(&e, 0), "ab");
+    }
+
+    #[test]
+    fn the_indent_operator_covers_the_range_and_is_one_undo_step() {
+        let (mut e, _p) = editor_with("indent-op.txt", b"ab\ncd\nef\n");
+        // From column 1, `j` lands on (1,1), so the range reaches into
+        // line 1 and both lines are touched by it.
+        e.view.cursor_col = 1;
+        sequence(&mut e, ">j");
+        assert_eq!(line(&e, 0), "    ab");
+        assert_eq!(line(&e, 1), "    cd");
+        assert_eq!(line(&e, 2), "ef", "the target's line past its column");
+        assert_eq!(e.doc.history().undo_depth(), 1, "one command, one undo");
+        e.undo();
+        assert_eq!(line(&e, 0), "ab");
+        assert_eq!(line(&e, 1), "cd");
+    }
+
+    /// Indent must agree with delete about which lines a range names — one
+    /// key means the same thing in every sequence (spec §2).
+    #[test]
+    fn the_indent_operator_skips_the_line_the_target_lands_on() {
+        let (mut e, _p) = editor_with("indent-boundary.txt", b"ab\ncd\n");
+        // From column 0, `j` lands on (1,0): half-open, so the range is
+        // exactly line 0 — the same lines `Leader d j` would delete.
+        sequence(&mut e, ">j");
+        assert_eq!(line(&e, 0), "    ab");
+        assert_eq!(line(&e, 1), "cd", "the endpoint line is untouched");
+    }
+
+    #[test]
+    fn repeated_indent_targets_the_line() {
+        let (mut e, _p) = editor_with("indent-repeat.txt", b"ab\ncd\n");
+        sequence(&mut e, ">>");
+        assert_eq!(line(&e, 0), "    ab");
+        assert_eq!(line(&e, 1), "cd");
+    }
+
+    #[test]
+    fn ctrl_slash_comments_and_uncomments_the_line() {
+        let (mut e, _p) = editor_with("comment.rs", b"let x = 1;\n");
+        e.handle_key(chord(KeyCode::Char('/')));
+        assert_eq!(line(&e, 0), "// let x = 1;");
+        assert_eq!(e.message, "commented 1 line");
+        assert_eq!(
+            e.view.cursor_col, 3,
+            "the cursor moves with the text it is on"
+        );
+        e.handle_key(chord(KeyCode::Char('/')));
+        assert_eq!(line(&e, 0), "let x = 1;");
+        assert_eq!(e.view.cursor_col, 0);
+    }
+
+    #[test]
+    fn commenting_keeps_the_indentation_and_skips_blank_lines() {
+        let (mut e, _p) = editor_with("comment-indent.py", b"  x = 1\n\ny = 2\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        // A cursor mid-line brings its line into the range; a range that ends
+        // at column 0 stops before that line, the same as every operator.
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 3;
+        e.handle_key(chord(KeyCode::Char('/')));
+        assert_eq!(line(&e, 0), "  # x = 1");
+        assert_eq!(line(&e, 1), "", "a blank line is not given a marker");
+        assert_eq!(line(&e, 2), "# y = 2");
+        assert_eq!(e.doc.history().undo_depth(), 1, "one command, one undo");
+    }
+
+    #[test]
+    fn a_partly_commented_range_is_commented_rather_than_uncommented() {
+        let (mut e, _p) = editor_with("comment-partly.go", b"// one\ntwo\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 3;
+        e.handle_key(chord(KeyCode::Char('/')));
+        assert_eq!(line(&e, 0), "// // one");
+        assert_eq!(line(&e, 1), "// two");
+    }
+
+    #[test]
+    fn a_file_type_without_a_line_comment_says_so() {
+        let (mut e, _p) = editor_with("comment.md", b"# heading\n");
+        e.handle_key(chord(KeyCode::Char('/')));
+        assert_eq!(e.message, "this file type has no line comment");
+        assert_eq!(line(&e, 0), "# heading");
+    }
+
+    #[test]
+    fn leader_w_toggles_word_wrap() {
+        let (mut e, _p) = editor_with("wrap-toggle.txt", b"alpha beta\n");
+        assert!(!e.view.word_wrap, "off by default (spec 4.5)");
+        sequence(&mut e, "w");
+        assert!(e.view.word_wrap);
+        assert_eq!(e.message, "word wrap on");
+        sequence(&mut e, "w");
+        assert!(!e.view.word_wrap);
+    }
+
+    #[test]
+    fn alt_z_toggles_word_wrap_without_typing_a_z() {
+        let (mut e, _p) = editor_with("wrap-alt.txt", b"alpha beta\n");
+        e.handle_key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT));
+        assert!(e.view.word_wrap);
+        assert_eq!(line(&e, 0), "alpha beta", "nothing was typed");
+    }
+
+    #[test]
+    fn a_wrapped_vertical_move_stays_on_the_same_line() {
+        let (mut e, _p) = editor_with("wrap-move.txt", b"alpha beta gamma delta\nsecond\n");
+        e.view.word_wrap = true;
+        e.view.width = 10;
+        e.viewport_height_hint = 5;
+        e.move_cursor(0, 1);
+        assert_eq!(e.view.cursor_line, 0, "the next *row*, not the next line");
+        assert_eq!(e.view.cursor_col, 10);
+        e.move_cursor(0, -1);
+        assert_eq!(e.view.cursor_col, 0);
+    }
+
+    #[test]
+    fn a_cursor_deep_in_a_wrapped_line_scrolls_the_viewport() {
+        let (mut e, _p) = editor_with("wrap-scroll.txt", b"alpha beta gamma delta\nsecond\n");
+        e.view.word_wrap = true;
+        e.view.width = 10;
+        e.viewport_height_hint = 2;
+        e.view.cursor_col = 17;
+        e.ensure_cursor_visible();
+        assert_eq!(e.view.top_line, 0, "the line itself is still the top");
+        assert_eq!(e.view.top_row, 1, "the viewport starts one row down");
+    }
+
+    #[test]
+    fn a_text_object_deletes_what_it_names() {
+        let (mut e, _p) = editor_with("object-word.txt", b"one two three\n");
+        e.view.cursor_col = 5;
+        sequence(&mut e, "diw");
+        assert_eq!(line(&e, 0), "one  three", "the word, not the gap around it");
+    }
+
+    #[test]
+    fn an_object_taken_around_a_word_takes_the_gap_too() {
+        let (mut e, _p) = editor_with("object-around.txt", b"one two three\n");
+        e.view.cursor_col = 5;
+        sequence(&mut e, "daw");
+        assert_eq!(line(&e, 0), "one three");
+    }
+
+    #[test]
+    fn a_text_object_can_be_selected_instead_of_deleted() {
+        let (mut e, _p) = editor_with("object-select.txt", b"f(alpha)\n");
+        e.view.cursor_col = 4;
+        sequence(&mut e, "vi(");
+        assert_eq!(e.selection(), Some((Pos::new(0, 2), Pos::new(0, 7))));
+        assert_eq!(line(&e, 0), "f(alpha)", "selecting changed nothing");
+    }
+
+    #[test]
+    fn an_object_that_is_not_there_says_so() {
+        let (mut e, _p) = editor_with("object-none.txt", b"plain text\n");
+        sequence(&mut e, "di(");
+        assert_eq!(e.message, "no parentheses inside the cursor");
+        assert_eq!(line(&e, 0), "plain text");
+    }
+
+    #[test]
+    fn a_mark_past_the_end_of_a_shrunk_document_lands_inside_it() {
+        let (mut e, _p) = editor_with("mark-shrunk.txt", b"one\ntwo\nthree\n");
+        e.view.cursor_line = 2;
+        sequence(&mut e, "ma");
+        // Delete the marked line out from under the mark: the range spans
+        // the boundary so the line really disappears rather than emptying.
+        e.doc.edit(Pos::new(1, 3), Pos::new(2, 5), "");
+        assert_eq!(e.doc.line_count(), 2, "the marked line is gone");
+        sequence(&mut e, "'a");
+        assert_eq!(e.view.cursor_line, 1, "clamped to the last line");
     }
 
     #[test]
@@ -2266,7 +3503,10 @@ mod tests {
         let (mut e, _p) = editor_with("leader-again.txt", b"ab\n");
         sequence(&mut e, "d");
         e.handle_key(chord(KeyCode::Char(' ')));
-        assert_eq!(e.message, "delete: motion?", "the operator is still pending");
+        assert_eq!(
+            e.message, "delete: motion?",
+            "the operator is still pending"
+        );
         e.handle_key(key(KeyCode::Char('w')));
         assert_eq!(line(&e, 0), "", "the word the operator was waiting for");
         assert_eq!(e.message, "deleted 2 chars");
@@ -2437,11 +3677,7 @@ mod tests {
         e.handle_key(chord(KeyCode::Char('\u{07}')));
         type_into_prompt(&mut e, "abc");
         e.handle_key(key(KeyCode::Enter));
-        assert!(
-            e.message.contains("not a line number"),
-            "{}",
-            e.message
-        );
+        assert!(e.message.contains("not a line number"), "{}", e.message);
         assert_eq!(e.view.cursor_line, 0);
     }
 
@@ -2621,7 +3857,11 @@ mod tests {
         select(&mut e, 1, 4);
         e.handle_key(chord(KeyCode::Char('\u{03}')));
         e.handle_key(chord(KeyCode::Char('\u{16}')));
-        assert_eq!(line(&e, 0), "abcdef", "pasting over its own text is a no-op");
+        assert_eq!(
+            line(&e, 0),
+            "abcdef",
+            "pasting over its own text is a no-op"
+        );
     }
 
     #[test]
@@ -2649,7 +3889,11 @@ mod tests {
             "{}",
             e.message
         );
-        assert_eq!(line(&e, 0), "line 0", "the refused edit must change nothing");
+        assert_eq!(
+            line(&e, 0),
+            "line 0",
+            "the refused edit must change nothing"
+        );
         assert!(!e.dirty);
     }
 
@@ -2811,6 +4055,393 @@ mod tests {
     }
 
     #[test]
+    fn tab_writes_one_level_in_the_files_own_style() {
+        let (mut e, _p) = editor_with("indent-tab-key.txt", b"one\n");
+        e.indent = IndentStyle::Tabs;
+        e.handle_key(key(KeyCode::Tab));
+        assert_eq!(line(&e, 0), "\tone");
+
+        let (mut e, _p) = editor_with("indent-space-key.txt", b"one\n");
+        e.indent = IndentStyle::Spaces(2);
+        e.handle_key(key(KeyCode::Tab));
+        assert_eq!(line(&e, 0), "  one");
+    }
+
+    #[test]
+    fn shift_tab_unindents_the_line_and_moves_the_cursor_with_it() {
+        let (mut e, _p) = editor_with("indent-shift-tab.txt", b"    one\n");
+        e.indent = IndentStyle::Spaces(4);
+        e.view.cursor_col = 5;
+        e.handle_key(key(KeyCode::BackTab));
+        assert_eq!(line(&e, 0), "one");
+        assert_eq!(e.view.cursor_col, 1, "the text moved under the cursor");
+    }
+
+    #[test]
+    fn shift_tab_unindents_every_line_a_selection_touches() {
+        let (mut e, _p) = editor_with("indent-shift-tab-selection.txt", b"    one\n    two\n");
+        e.indent = IndentStyle::Spaces(4);
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 3;
+        e.handle_key(key(KeyCode::BackTab));
+        assert_eq!(line(&e, 0), "one");
+        assert_eq!(line(&e, 1), "two");
+    }
+
+    #[test]
+    fn enter_keeps_the_indentation_and_opens_a_block() {
+        let (mut e, _p) = editor_with("enter-indent.rs", b"fn main() {\n");
+        e.indent = IndentStyle::Spaces(4);
+        e.view.cursor_col = 11;
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 1), "    ", "one level in from the line above");
+        e.handle_key(key(KeyCode::Char('x')));
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 2), "    ", "a plain line keeps its own level");
+    }
+
+    #[test]
+    fn enter_inside_an_empty_pair_does_not_indent() {
+        let (mut e, _p) = editor_with("enter-pair.txt", b"call()\n");
+        e.indent = IndentStyle::Spaces(4);
+        e.view.cursor_col = 5;
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 0), "call(");
+        assert_eq!(line(&e, 1), ")", "the closer stays where it is");
+    }
+
+    #[test]
+    fn a_closer_at_the_start_of_a_line_takes_a_level_back() {
+        let (mut e, _p) = editor_with("closer-dedent.rs", b"fn main() {\n    \n");
+        e.indent = IndentStyle::Spaces(4);
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 4;
+        e.insert_char('}');
+        assert_eq!(line(&e, 1), "}");
+    }
+
+    #[test]
+    fn a_tab_indented_file_is_edited_with_tabs() {
+        let (mut e, _p) = editor_with("detect-tabs.rs", b"fn f() {\n\tif x {\n\t\ty();\n\t}\n}\n");
+        e.apply_settings(&Config::default());
+        assert_eq!(e.indent, IndentStyle::Tabs);
+    }
+
+    #[test]
+    fn editorconfig_outranks_the_files_own_content() {
+        let dir = std::env::temp_dir().join("zeno-editorconfig-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".editorconfig"),
+            "root = true\n[*.py]\nindent_style = space\nindent_size = 2\n",
+        )
+        .unwrap();
+        let path = dir.join("script.py");
+        // The file itself is indented four ways; the config says two.
+        std::fs::write(&path, b"if x:\n    one()\n").unwrap();
+        let doc = Doc::open(&path).unwrap();
+        let mut editor = Editor::new(doc, path);
+        editor.apply_settings(&Config::default());
+        assert_eq!(editor.indent, IndentStyle::Spaces(2));
+    }
+
+    #[test]
+    fn settings_reach_the_editor() {
+        let (mut e, _p) = editor_with("settings.txt", b"ab\n");
+        let settings = zeno_cli::config::parse(
+            "[settings]\nword_wrap = true\nline_numbers = false\ntab_width = 2\nauto_pair = false\n",
+        );
+        let config = Config {
+            settings,
+            ..Config::default()
+        };
+        e.apply_settings(&config);
+        assert!(e.view.word_wrap);
+        assert!(!e.view.show_line_numbers);
+        assert_eq!(
+            e.indent,
+            IndentStyle::Spaces(2),
+            "a file with no style of its own"
+        );
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "(ab", "pairing was turned off");
+    }
+
+    #[test]
+    fn a_chord_from_the_config_runs_its_command() {
+        let (mut e, _p) = editor_with("binding.toml", b"one two\n");
+        let config = zeno_cli::config::parse_config(
+            "[keys]\nleader = \"ctrl+b\"\n\n[[keys.bindings]]\nkeys = \"ctrl+shift+w\"\ncommand = \"toggle_word_wrap\"\nsave_as = \"nonsense\"\n",
+        );
+        e.apply_settings(&config);
+        assert!(!e.view.word_wrap);
+        e.handle_key(KeyEvent::new(
+            KeyCode::Char('w'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+        ));
+        assert!(e.view.word_wrap, "the configured chord ran its command");
+        // The bound chord swallowed the key: nothing was typed.
+        assert_eq!(line(&e, 0), "one two");
+    }
+
+    #[test]
+    fn a_rebound_leader_opens_a_sequence() {
+        let (mut e, _p) = editor_with("leader-rebind.txt", b"one\ntwo\n");
+        e.apply_settings(&zeno_cli::config::parse_config(
+            "[keys]\nleader = \"ctrl+b\"\n",
+        ));
+        e.handle_key(KeyEvent::new(KeyCode::Char('b'), KeyModifiers::CONTROL));
+        assert!(!e.seq.is_idle(), "Ctrl+B opened a sequence");
+        e.handle_key(KeyEvent::new(KeyCode::Char(','), KeyModifiers::NONE));
+        assert!(
+            !e.view.show_line_numbers,
+            "Leader , still toggles the gutter"
+        );
+    }
+
+    #[test]
+    fn a_leader_that_was_rebound_is_an_ordinary_key_again() {
+        let (mut e, _p) = editor_with("leader-rebind-old.txt", b"ab\n");
+        e.apply_settings(&zeno_cli::config::parse_config(
+            "[keys]\nleader = \"ctrl+b\"\n",
+        ));
+        // Ctrl+Space is no longer the leader, so it types nothing and starts
+        // no sequence.
+        e.handle_key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL));
+        assert!(e.seq.is_idle());
+        assert_eq!(line(&e, 0), "ab");
+    }
+
+    #[test]
+    fn autosave_writes_the_file_after_a_quiet_moment() {
+        let (mut e, path) = editor_with("autosave.txt", b"ab\n");
+        e.autosave = true;
+        e.insert_char('X');
+        // Not quiet yet: the key was just pressed.
+        e.autosave_if_idle();
+        assert!(e.dirty, "it does not write mid-typing");
+        e.last_key = std::time::Instant::now() - Duration::from_millis(1000);
+        e.autosave_if_idle();
+        assert!(!e.dirty, "it writes once the typing stops");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Xab\n");
+    }
+
+    #[test]
+    fn the_buffer_prints_back_the_text_it_was_given() {
+        let (mut e, _p) = editor_with("text-body.txt", b"a\nb\n");
+        assert_eq!(e.text(), "a\nb\n", "a final newline stays a final newline");
+        let (mut e, _p) = editor_with("text-no-newline.txt", b"a\nb");
+        assert_eq!(e.text(), "a\nb");
+    }
+
+    #[test]
+    fn the_buffer_prints_what_was_edited() {
+        let (mut e, _p) = editor_with("text-edited.txt", b"one\n");
+        e.insert_char('X');
+        assert_eq!(e.text(), "Xone\n");
+    }
+
+    #[test]
+    fn leader_question_opens_help_and_esc_closes_it() {
+        let (mut e, _p) = editor_with("help.txt", b"ab\n");
+        sequence(&mut e, "?");
+        assert!(
+            matches!(e.overlay, Some(Overlay::Help { .. })),
+            "Leader ? opens the help list"
+        );
+        e.handle_key(key(KeyCode::Down));
+        match e.overlay {
+            Some(Overlay::Help { offset }) => assert_eq!(offset, 1, "it scrolls"),
+            _ => panic!("the help list is still open"),
+        }
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.overlay.is_none());
+        assert_eq!(line(&e, 0), "ab", "reading help edits nothing");
+    }
+
+    #[test]
+    fn f1_opens_the_palette_and_enter_runs_the_chosen_command() {
+        let (mut e, _p) = editor_with("palette.txt", b"ab\n");
+        assert!(!e.view.word_wrap);
+        e.handle_key(key(KeyCode::F(1)));
+        assert!(matches!(e.overlay, Some(Overlay::Palette(_))));
+        type_into_prompt(&mut e, "wrap");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.view.word_wrap, "running the command took effect");
+        assert!(e.overlay.is_none(), "and the palette closed");
+    }
+
+    #[test]
+    fn the_palette_query_does_not_reach_the_document() {
+        let (mut e, _p) = editor_with("palette-keys.txt", b"ab\n");
+        e.handle_key(key(KeyCode::F(1)));
+        type_into_prompt(&mut e, "save");
+        assert_eq!(line(&e, 0), "ab", "the letters went to the query");
+        assert!(!e.dirty);
+    }
+
+    #[test]
+    fn escape_closes_the_palette_without_running_anything() {
+        let (mut e, _p) = editor_with("palette-esc.txt", b"ab\n");
+        e.handle_key(key(KeyCode::F(1)));
+        type_into_prompt(&mut e, "quit");
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.overlay.is_none());
+        assert!(!e.quit, "the command under the cursor did not run");
+    }
+
+    #[test]
+    fn a_palette_command_that_needs_an_answer_asks_for_it() {
+        let (mut e, _p) = editor_with("palette-prompt.txt", b"one\ntwo\n");
+        e.handle_key(key(KeyCode::F(1)));
+        type_into_prompt(&mut e, "go to line");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none(), "the palette closed");
+        assert!(e.prompt.is_some(), "and the line prompt took over");
+    }
+
+    #[test]
+    fn the_palette_arrow_keys_move_the_selection() {
+        let (mut e, _p) = editor_with("palette-arrows.txt", b"ab\n");
+        e.handle_key(key(KeyCode::F(1)));
+        e.handle_key(key(KeyCode::Down));
+        match &e.overlay {
+            Some(Overlay::Palette(palette)) => {
+                assert_eq!(palette.selection(), 1);
+                assert_eq!(palette.selected().map(|entry| entry.label), Some("Quit"));
+            }
+            _ => panic!("the palette is open"),
+        }
+    }
+
+    #[test]
+    fn an_opening_bracket_brings_its_partner() {
+        let (mut e, _p) = editor_with("pair.txt", b"\n");
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "()");
+        assert_eq!(e.view.cursor_col, 1, "the caret sits between them");
+    }
+
+    #[test]
+    fn typing_the_closer_that_is_already_there_steps_over_it() {
+        let (mut e, _p) = editor_with("pair-step.txt", b"()\n");
+        e.view.cursor_col = 1;
+        e.insert_char(')');
+        assert_eq!(line(&e, 0), "()", "it is not doubled");
+        assert_eq!(e.view.cursor_col, 2);
+    }
+
+    #[test]
+    fn a_bracket_next_to_text_is_not_paired() {
+        let (mut e, _p) = editor_with("pair-text.txt", b"foo\n");
+        e.view.cursor_col = 0;
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "(foo", "editing text, not opening a block");
+    }
+
+    #[test]
+    fn an_apostrophe_between_letters_is_not_paired() {
+        let (mut e, _p) = editor_with("pair-apostrophe.txt", b"dont\n");
+        e.view.cursor_col = 2;
+        let mut editor = e;
+        editor.insert_char('\'');
+        assert_eq!(line(&editor, 0), "do'nt");
+        assert_eq!(editor.view.cursor_col, 3);
+    }
+
+    #[test]
+    fn a_pair_is_not_put_around_a_selection() {
+        let (mut e, _p) = editor_with("pair-selection.txt", b"abc\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_col = 3;
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "(", "typing over a selection replaces it");
+    }
+
+    #[test]
+    fn backspacing_an_empty_pair_removes_both_halves() {
+        let (mut e, _p) = editor_with("pair-backspace.txt", b"\n");
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "()");
+        e.backspace();
+        assert_eq!(line(&e, 0), "");
+        assert_eq!(e.view.cursor_col, 0);
+    }
+
+    #[test]
+    fn ctrl_h_replaces_every_match_in_the_file() {
+        let (mut e, _p) = editor_with("replace.txt", b"hit x hit\ny hit\n");
+        e.handle_key(chord(KeyCode::Char('h')));
+        type_into_prompt(&mut e, "hit");
+        assert_eq!(prompt_text(&e).as_deref(), Some("hit"));
+        assert_eq!(line(&e, 0), "hit x hit", "typing the pattern edits nothing");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.prompt.is_some(), "it asks what to put there");
+        type_into_prompt(&mut e, "HIT");
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 0), "HIT x HIT");
+        assert_eq!(line(&e, 1), "y HIT");
+        assert_eq!(e.message, "replaced 3 matches");
+        assert_eq!(e.doc.history().undo_depth(), 1, "one command, one undo");
+        e.undo();
+        assert_eq!(line(&e, 0), "hit x hit");
+    }
+
+    #[test]
+    fn a_replacement_may_be_empty() {
+        let (mut e, _p) = editor_with("replace-empty.txt", b"a-b-c\n");
+        sequence(&mut e, "r");
+        type_into_prompt(&mut e, "-");
+        e.handle_key(key(KeyCode::Enter));
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 0), "abc");
+        assert_eq!(e.message, "replaced 2 matches");
+    }
+
+    #[test]
+    fn a_replacement_with_nothing_to_find_says_so() {
+        let (mut e, _p) = editor_with("replace-none.txt", b"abc\n");
+        sequence(&mut e, "r");
+        type_into_prompt(&mut e, "zzz");
+        e.handle_key(key(KeyCode::Enter));
+        // It still asks for the replacement: whether the pattern matches is
+        // answered by the scan, not by the prompt.
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(e.message, "no match for zzz");
+        assert_eq!(line(&e, 0), "abc");
+    }
+
+    #[test]
+    fn a_replacement_that_does_not_compile_is_refused() {
+        let (mut e, _p) = editor_with("replace-bad.txt", b"abc\n");
+        e.handle_key(chord(KeyCode::Char('h')));
+        type_into_prompt(&mut e, "a(");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(
+            e.prompt.is_none(),
+            "a pattern that does not compile is not replaced"
+        );
+        assert!(e.message.contains("invalid pattern"), "{}", e.message);
+        assert_eq!(line(&e, 0), "abc");
+    }
+
+    #[test]
+    fn a_replacement_takes_the_selection_only_when_there_is_one() {
+        let (mut e, _p) = editor_with("replace-selection.txt", b"hit\nmiddle\nhit\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_line = 0;
+        e.view.cursor_col = 3;
+        sequence(&mut e, "r");
+        type_into_prompt(&mut e, "hit");
+        e.handle_key(key(KeyCode::Enter));
+        type_into_prompt(&mut e, "HIT");
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 0), "HIT");
+        assert_eq!(line(&e, 2), "hit", "the last line was outside the range");
+    }
+
+    #[test]
     fn a_count_for_a_document_that_changed_is_counted_again() {
         let (mut e, _p) = editor_with("find-stale.txt", b"hit\nx\nhit\n");
         e.handle_key(chord(KeyCode::Char('\u{06}')));
@@ -2848,7 +4479,10 @@ mod tests {
             e.handle_key(key(KeyCode::Right));
         }
         assert_eq!(e.view.cursor_col, 10);
-        assert_eq!(e.view.left_col, 1, "the window scrolls to keep the cursor in it");
+        assert_eq!(
+            e.view.left_col, 1,
+            "the window scrolls to keep the cursor in it"
+        );
         e.handle_key(key(KeyCode::Right));
         assert_eq!(e.view.cursor_col, 11);
         assert_eq!(e.view.left_col, 2);
@@ -2866,7 +4500,10 @@ mod tests {
             e.handle_key(key(KeyCode::Left));
         }
         assert_eq!(e.view.cursor_col, 0);
-        assert_eq!(e.view.left_col, 0, "the window scrolls back to the first column");
+        assert_eq!(
+            e.view.left_col, 0,
+            "the window scrolls back to the first column"
+        );
     }
 
     #[test]

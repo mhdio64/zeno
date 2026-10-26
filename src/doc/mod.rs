@@ -442,10 +442,16 @@ impl Doc {
         };
 
         let lines: Vec<String> = combined.split('\n').map(str::to_owned).collect();
+        let replacement = lines.len() as u64;
         self.overlay.replace_lines(start.line, lines);
-        // The lines the range spanned are now part of the first one.
+        // The lines the range spanned now sit *after* the replacement's own
+        // lines — at `start.line + replacement`, not at `start.line + 1`.
+        // The two are the same place only when the replacement is a single
+        // line; with a multi-line replacement the short answer would delete
+        // one of the new lines and leave an original in its place, which is
+        // what made a multi-line indent over a multi-line range lose a line.
         for _ in 0..swallowed {
-            self.overlay.delete_line(start.line + 1);
+            self.overlay.delete_line(start.line + replacement);
         }
 
         (removed, inserted_end(start, text))
@@ -664,6 +670,28 @@ mod tests {
         assert_eq!(whole_text(&doc), "X\nd");
         doc.undo();
         assert_eq!(whole_text(&doc), before);
+    }
+
+    /// The replacement's own line breaks and the range's must not be
+    /// confused for each other.
+    ///
+    /// A range spanning two lines replaced by three: the two originals the
+    /// range swallowed are deleted *after* the three new lines, so none of
+    /// the new lines is eaten and no original survives beside them. This is
+    /// the shape of pasting a multi-line clipboard over a multi-line
+    /// selection — and of the indent operator rewriting a range.
+    #[test]
+    fn a_multi_line_replacement_over_a_span_keeps_its_own_lines() {
+        let path = temp_file("replace-span.txt", b"ab\ncd\nef\n");
+        let mut doc = Doc::open(&path).unwrap();
+        doc.index_fully();
+        let before = whole_text(&doc);
+        doc.edit(Pos::new(0, 1), Pos::new(1, 1), "X\nY\nZ");
+        assert_eq!(whole_text(&doc), "aX\nY\nZd\nef");
+        doc.undo();
+        assert_eq!(whole_text(&doc), before, "the undo restores it exactly");
+        doc.redo();
+        assert_eq!(whole_text(&doc), "aX\nY\nZd\nef", "and the redo agrees");
     }
 
     #[test]

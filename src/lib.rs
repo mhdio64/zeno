@@ -6,12 +6,16 @@
 //! isolation by the `zeno-bench` binary, without a terminal attached.
 
 pub mod clipboard;
+pub mod config;
 pub mod doc;
 pub mod highlight;
+pub mod indent;
+pub mod keys;
 pub mod motion;
+pub mod panel;
 pub mod prompt;
-pub mod search;
 pub mod render;
+pub mod search;
 pub mod sequence;
 
 pub use doc::{Doc, LineIndex, Overlay};

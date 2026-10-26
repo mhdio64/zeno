@@ -44,6 +44,7 @@ Two caveats worth knowing before rebinding:
 | `Alt+Z` | Toggle word wrap |
 | `Shift+arrows` | Extend selection |
 | `Shift+Home` `Shift+End` | Extend to line start / end |
+| `Shift+Tab` | Unindent line |
 | `F1` | Command palette |
 
 `Ctrl+Shift+<letter>` is deliberately absent: legacy terminal input encodes it identically to `Ctrl+<letter>`, and crossterm cannot use the Kitty keyboard protocol on Windows to tell them apart. Every command reachable only through `Ctrl+Shift+<letter>` in VSCode has a two-key route here.
@@ -85,6 +86,12 @@ to the left of what is showing. `Home` brings the viewport back to the first
 column. The status line counts columns from the start of the line, not from
 the edge of the screen.
 
+With wrapping on (`Alt+Z`, `Leader w`) the window is the line's width instead,
+and the horizontal offset is ignored. A wrapped line carries its number only
+on its first screen row; the rows under it are the same line and their gutter
+is blank. `Up` and `Down` move one *screen row*, so a long line is walked row
+by row, and a row that ends early clamps the way a short line does.
+
 ## The prompt line
 
 Commands that need an argument ask for it in the message line, so the document
@@ -112,6 +119,13 @@ search pattern), the other collects one letter from a fixed set (the save
 decision). A choice has no caret and is answered with the letter itself; `Esc`
 abandons either kind.
 
+Replace (`Ctrl+H`, `Leader r`) asks twice: first for the pattern, then for what
+to put in its place. It replaces every match in the selection, and every match
+in the file when there is no selection; a file too big to edit as one range is
+refused with the same explanation a wide delete gives. The pattern is
+highlighted while it is typed, and the whole replacement is one edit, so one
+`Ctrl+Z` reverses it.
+
 Find asks for a pattern in the same prompt. The pattern is compiled as it is
 typed, so the matches in the viewport are highlighted while it is being
 written, and the prompt line says how many matches there are once the
@@ -120,9 +134,25 @@ the prompt line and keeps the last pattern that did. `Enter` jumps to the
 first match at or after the caret; `Leader n` and `Leader N` cycle through
 the matches and wrap around at the ends of the file.
 
+Esc closes the find prompt and keeps the highlighted matches on screen so you
+can edit the file while looking at them; a second Esc clears the highlight and
+returns to ordinary editing. Replace behaves the same way: the first Esc keeps
+the current pattern's highlights, and the second Esc clears them.
+
 Reloading after an external change discards the buffer's unsaved edits *and* its
 undo history, because that history describes the document that was replaced. The
 message says so (ADR 0015).
+
+## Panels
+
+`Leader ?` opens the help list and `F1` or `Leader p` opens the command
+palette. Both cover the document while they are open and own the keyboard for
+the same reason the prompt does: in the palette every printable key is part of
+the query, so no chord fires and no sequence starts. `Esc` closes either one
+without running anything, `Enter` runs the highlighted command, the up and
+down arrows move the highlight, and in the help list they scroll. Both are
+built from one table, so a command reachable from the palette is one the help
+list also shows.
 
 ## Layer 3 — leader sequences
 
@@ -168,11 +198,13 @@ A motion names a *boundary*, so an operator's range is always half-open:
 up to and including its last character. There is no per-motion "inclusive"
 case.
 
-The motions listed below are the design. Until the editable overlay stops
-paying a superlinear price for a large range (ADR 0012, and "Finding 8" in
-[performance.md](./performance.md)), the file-wide ones — `gg`, `G`, `}`,
-`%` — are not accepted as an operator's motion: the sequence cancels rather
-than issuing a delete that would take seconds.
+Landmark motions — `}`, `%` — are accepted everywhere, but the *range* they
+name is checked before anything is edited: one wider than 10,000 lines is
+refused with an explanation, the same rule that stops a stray `Ctrl+A` from
+turning one keystroke into a minute of work (ADR 0012, and "Finding 8" in
+[performance.md](./performance.md)). The two motions that name a whole-file
+range by definition, `gg` and `G`, are not accepted at all: there is no reach
+at which they could ever be allowed to edit.
 
 | Motion | Target |
 | --- | --- |
@@ -213,34 +245,58 @@ A run of digits before the operator sets a repeat count: `Leader 3 d w` deletes 
 
 ## Configuration
 
-`zeno.toml`, reloaded when it changes on disk.
+`zeno.toml`, read once at startup.
 
 | Platform | Path |
 | --- | --- |
 | Linux, macOS | `$XDG_CONFIG_HOME/zeno/zeno.toml`, else `~/.config/zeno/zeno.toml` |
 | Windows | `%APPDATA%\zeno\zeno.toml` |
 
-The same directory holds `syntaxes/` and `themes/`. Any `.sublime-syntax` file in `syntaxes/` is registered at startup; any theme file in `themes/` becomes selectable.
+Only the `[settings]` table is read today. A missing file, a missing key and a
+value that cannot be understood all leave the default in place: a typo in a
+config file is not a reason for an editor not to start.
 
 ```toml
-[keys]
-leader = "ctrl+space"
-
-[[keys.bindings]]
-keys = "ctrl+s"
-command = "save"
-
-[[keys.bindings]]
-keys = "leader d w"
-command = "delete_word"
-
 [settings]
-word_wrap = false
+word_wrap = false          # Alt+Z / Leader w at startup
 line_numbers = true
 relative_line_numbers = false
-indent_style = "auto"
-tab_width = 4
-auto_pair = true
-autosave = false
-theme = "zeno-dark"
+tab_width = 4              # one indent level, 1–16
+auto_pair = true           # (", [", {", " and ' complete themselves
+autosave = false           # write the file after a moment of quiet
+
+[keys]
+leader = "ctrl+space"      # what opens a sequence
+
+[[keys.bindings]]
+keys = "ctrl+shift+w"      # written the way it is said
+command = "toggle_word_wrap"
 ```
+
+`[keys]` is read as well. The leader is one chord, and each
+`[[keys.bindings]]` entry adds another: `keys` is parsed as `ctrl+s`,
+`alt+z`, `f1`, `ctrl+space`, and `command` is a name from the table this file
+is built from — `save`, `quit`, `force_quit`, `undo`, `redo`, `find`,
+`replace`, `next_match`, `previous_match`, `go_to_line`, `help`, `palette`,
+`indent_line`, `unindent_line`, `toggle_line_comment`, and the three
+`toggle_*` view switches. Spaces, dashes and underscores are interchangeable
+in a name: `go to line`, `go-to-line` and `go_to_line` are one command.
+
+A user binding is looked at before the built-in chords, so a config file can
+move a command without having to unbind where it was. A chord or command that
+cannot be read is a line the editor ignores: a typo in a config file is not a
+reason for an editor not to start.
+
+The directory next to `zeno.toml` also holds `syntaxes/`, whose
+`.sublime-syntax` files are picked up automatically and win over the bundled
+definitions for the extensions they claim (spec §4.3). A `themes/` directory
+is reserved for later; the theme is fixed for now.
+
+Indentation is not asked for in `zeno.toml` beyond `tab_width`: the style is
+detected from the file itself, and `.editorconfig` in the file's directory
+tree outranks that detection (spec §4.4).
+
+A filename with no line-comment syntax (`Ctrl+/`) has none to insert, and the
+message line says so rather than inventing a block comment. Comment prefixes
+are chosen by extension: `//` in C-like files, `#` in shell, Python, TOML and
+YAML, `--` in SQL and Lua, `;` in Lisp and assembly.

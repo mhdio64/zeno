@@ -52,7 +52,7 @@ use std::thread::JoinHandle;
 
 use ratatui::style::{Color, Modifier, Style};
 use syntect::highlighting::{FontStyle, HighlightState, RangedHighlightIterator, Theme, ThemeSet};
-use syntect::parsing::{ParseState, ScopeStack, SyntaxReference, SyntaxSet};
+use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
 
 use crate::doc::{Doc, Snapshot};
 
@@ -231,12 +231,10 @@ impl Highlighter {
             // truth, and keeping them is what stops a keystroke from
             // flashing the screen plain while the worker catches up. It is
             // the same rule the worker applies to its own checkpoints.
-            match doc.first_changed_line_since(self.lines_version) {
-                Some(changed_line) => self.lines.retain(|line, _| *line < changed_line),
-                // Nothing has been written since: they are all still the
-                // truth, and an edit that did not touch this window must
-                // not blank it.
-                None => {}
+            // When nothing has been written since, nothing is dropped: an
+            // edit that did not touch this window must not blank it.
+            if let Some(changed_line) = doc.first_changed_line_since(self.lines_version) {
+                self.lines.retain(|line, _| *line < changed_line);
             }
             self.lines_version = version;
             changed = true;
@@ -362,6 +360,10 @@ struct Worker {
     name: Option<String>,
     /// Whether the syntax has been decided yet.
     detected: bool,
+    /// Where the syntaxes read from the config directory start in
+    /// `syntaxes`. The user's own are the last ones added, and are looked at
+    /// first.
+    user_from: usize,
     checkpoints: Checkpoints,
 }
 
@@ -370,7 +372,7 @@ impl Worker {
     fn detect(&mut self, request: &Request, path: &Path) {
         self.detected = true;
         let first_line = request.snapshot.line_text(0).map(|line| line.into_owned());
-        let syntax = detect_syntax(&self.syntaxes, path, first_line.as_deref());
+        let syntax = detect_syntax(&self.syntaxes, self.user_from, path, first_line.as_deref());
         self.name = syntax.as_ref().map(|syntax| syntax.name.clone());
         self.syntax = syntax;
     }
@@ -438,10 +440,11 @@ impl Worker {
             // painted as a comment.
             let too_long = text.len() > MAX_LINE_BYTES;
             let parsed: &str = if too_long { EMPTY_LINE } else { &text };
-            if let Some(spans) = self.spans_of(&mut parse, &mut state, &styler, parsed) {
-                if !too_long && line >= request.window.first {
-                    lines.insert(line, spans);
-                }
+            if let Some(spans) = self.spans_of(&mut parse, &mut state, &styler, parsed)
+                && !too_long
+                && line >= request.window.first
+            {
+                lines.insert(line, spans);
             }
             line += 1;
         }
@@ -490,25 +493,95 @@ impl Worker {
 /// neither says anything.
 fn detect_syntax(
     syntaxes: &SyntaxSet,
+    user_from: usize,
     path: &Path,
     first_line: Option<&str>,
 ) -> Option<SyntaxReference> {
-    if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
-        if let Some(syntax) = syntaxes.find_syntax_by_extension(name) {
-            return Some(syntax.clone());
-        }
+    if let Some(name) = path.file_name().and_then(|name| name.to_str())
+        && let Some(syntax) = user_syntax_by_extension(syntaxes, user_from, name)
+            .or_else(|| syntaxes.find_syntax_by_extension(name).cloned())
+    {
+        return Some(syntax);
     }
-    if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
-        if let Some(syntax) = syntaxes.find_syntax_by_extension(extension) {
-            return Some(syntax.clone());
-        }
+    if let Some(extension) = path.extension().and_then(|extension| extension.to_str())
+        && let Some(syntax) = user_syntax_by_extension(syntaxes, user_from, extension)
+            .or_else(|| syntaxes.find_syntax_by_extension(extension).cloned())
+    {
+        return Some(syntax);
     }
-    if let Some(line) = first_line {
-        if let Some(syntax) = syntaxes.find_syntax_by_first_line(line) {
-            return Some(syntax.clone());
-        }
+    if let Some(line) = first_line
+        && let Some(syntax) = syntaxes.find_syntax_by_first_line(line)
+    {
+        return Some(syntax.clone());
     }
     None
+}
+
+/// A syntax of the user's own that claims this extension.
+///
+/// The bundled syntaxes are consulted first by the set itself, so a file the
+/// user drops in for an extension syntect already knows would never be seen.
+/// Looking at their syntaxes first is what makes the directory an override
+/// and not just an addition.
+fn user_syntax_by_extension(
+    syntaxes: &SyntaxSet,
+    user_from: usize,
+    extension: &str,
+) -> Option<SyntaxReference> {
+    syntaxes
+        .syntaxes()
+        .get(user_from..)?
+        .iter()
+        .find(|syntax| {
+            syntax
+                .file_extensions
+                .iter()
+                .any(|known| known.eq_ignore_ascii_case(extension))
+        })
+        .cloned()
+}
+
+/// The bundled syntaxes, plus any `.sublime-syntax` files in the config
+/// directory's `syntaxes/` (spec §4.3).
+///
+/// Returns the set and where the user's syntaxes start in it. A file that
+/// cannot be read or parsed is skipped: one broken syntax must not cost the
+/// user every language they had.
+fn load_syntaxes() -> (SyntaxSet, usize) {
+    load_syntaxes_from(crate::config::syntaxes_dir().as_deref())
+}
+
+/// The same, reading the user's syntaxes from one directory.
+fn load_syntaxes_from(dir: Option<&Path>) -> (SyntaxSet, usize) {
+    let mut builder = SyntaxSet::load_defaults_nonewlines().into_builder();
+    let user_from = builder.syntaxes().len();
+    let Some(dir) = dir else {
+        return (builder.build(), user_from);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (builder.build(), user_from);
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "sublime-syntax")
+        })
+        .collect();
+    // Sorted, so the same directory always produces the same set: two files
+    // claiming one extension would otherwise resolve by directory order.
+    paths.sort();
+    for path in paths {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let fallback = path.file_stem().and_then(|stem| stem.to_str());
+        // A syntax that will not parse is left out; the rest still load.
+        if let Ok(syntax) = SyntaxDefinition::load_from_str(&text, false, fallback) {
+            builder.add(syntax);
+        }
+    }
+    (builder.build(), user_from)
 }
 
 /// A style from the theme, in the editor's terms.
@@ -558,7 +631,7 @@ fn work(
     // milliseconds, and the editor has fifty for its whole first frame. It
     // happens here, in the worker, so the editor paints plain text and the
     // colours arrive a moment later.
-    let syntaxes = SyntaxSet::load_defaults_nonewlines();
+    let (syntaxes, user_from) = load_syntaxes();
     let themes = ThemeSet::load_defaults();
     let Some(theme) = themes
         .themes
@@ -578,6 +651,7 @@ fn work(
         syntax: None,
         name: None,
         detected: false,
+        user_from,
         checkpoints: Checkpoints::new(),
     };
 
@@ -643,6 +717,82 @@ mod tests {
         let mut highlighter = Highlighter::start(&path);
         colours_of(&mut highlighter, &doc, 0, 10);
         assert_eq!(highlighter.syntax(), Some("Rust"));
+    }
+
+    /// A directory of the user's own syntaxes, with the given files in it.
+    fn syntax_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zeno-syntax-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, text) in files {
+            std::fs::write(dir.join(file), text).unwrap();
+        }
+        dir
+    }
+
+    /// A minimal syntax definition that claims one extension.
+    fn syntax_text(name: &str, extension: &str) -> String {
+        format!(
+            "%YAML 1.2\n---\nname: {name}\nfile_extensions: [{extension}]\nscope: source.{extension}\ncontexts:\n  main:\n    - match: '\\\\b\\\\d+\\\\b'\n      scope: constant.numeric.zeno\n"
+        )
+    }
+
+    #[test]
+    fn a_syntax_in_the_config_directory_is_picked_up() {
+        let dir = syntax_dir(
+            "custom",
+            &[("note.sublime-syntax", &syntax_text("Zeno Note", "zenonote"))],
+        );
+        let (syntaxes, user_from) = load_syntaxes_from(Some(&dir));
+        let path = Path::new("anything.zenonote");
+        let syntax = detect_syntax(&syntaxes, user_from, path, None).expect("the user's syntax");
+        assert_eq!(syntax.name, "Zeno Note");
+        assert_eq!(user_from, syntaxes.syntaxes().len() - 1);
+    }
+
+    #[test]
+    fn a_users_syntax_beats_the_bundled_one_for_the_same_extension() {
+        // `rs` is bundled, so the file would be Rust without the override.
+        let dir = syntax_dir(
+            "override",
+            &[("rs.sublime-syntax", &syntax_text("Not Rust", "rs"))],
+        );
+        let (syntaxes, user_from) = load_syntaxes_from(Some(&dir));
+        let syntax = detect_syntax(&syntaxes, user_from, Path::new("main.rs"), None)
+            .expect("a syntax for rs");
+        assert_eq!(syntax.name, "Not Rust", "the user's file is the answer");
+    }
+
+    #[test]
+    fn a_broken_syntax_file_does_not_take_the_others_with_it() {
+        let dir = syntax_dir(
+            "broken",
+            &[
+                ("a-broken.sublime-syntax", "this: is not [a syntax\n"),
+                (
+                    "b-good.sublime-syntax",
+                    &syntax_text("Zeno Good", "zenogood"),
+                ),
+            ],
+        );
+        let (syntaxes, user_from) = load_syntaxes_from(Some(&dir));
+        let syntax = detect_syntax(&syntaxes, user_from, Path::new("x.zenogood"), None)
+            .expect("the syntax that parsed");
+        assert_eq!(syntax.name, "Zeno Good");
+        // The bundled languages are still there.
+        let rust = detect_syntax(&syntaxes, user_from, Path::new("lib.rs"), None);
+        assert_eq!(rust.map(|syntax| syntax.name), Some("Rust".to_string()));
+    }
+
+    #[test]
+    fn a_missing_syntax_directory_is_the_bundled_set() {
+        let (syntaxes, user_from) = load_syntaxes_from(Some(Path::new("/no/such/zeno/syntaxes")));
+        assert_eq!(user_from, syntaxes.syntaxes().len());
+        assert_eq!(
+            detect_syntax(&syntaxes, user_from, Path::new("main.rs"), None)
+                .map(|syntax| syntax.name),
+            Some("Rust".to_string())
+        );
     }
 
     #[test]
@@ -852,10 +1002,10 @@ mod tests {
         for _ in 0..2000 {
             highlighter.request(&doc, 0, 10);
             highlighter.poll(&doc);
-            if let Some(spans) = highlighter.lines().get(&0) {
-                if !spans.iter().any(|span| span.start == 0 && span.end == 2) {
-                    return;
-                }
+            if let Some(spans) = highlighter.lines().get(&0)
+                && !spans.iter().any(|span| span.start == 0 && span.end == 2)
+            {
+                return;
             }
             std::thread::sleep(std::time::Duration::from_millis(1));
         }

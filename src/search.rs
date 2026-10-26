@@ -22,15 +22,15 @@
 //! exactly like a search that found nothing, and the user cannot tell the
 //! two apart.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use regex::Regex;
 
-use crate::doc::edit::Pos;
 use crate::doc::Snapshot;
+use crate::doc::edit::Pos;
 
 /// A match, as a line and a range of character columns.
 ///
@@ -210,10 +210,10 @@ impl SearchJob {
     /// be able to hold up the editor.
     pub fn cancel(&mut self) {
         self.cancel.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            if handle.is_finished() {
-                let _ = handle.join();
-            }
+        if let Some(handle) = self.handle.take()
+            && handle.is_finished()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -601,7 +601,14 @@ mod tests {
         );
         let matches = found(&events);
         assert_eq!(matches.len(), 1, "{matches:?}");
-        assert_eq!(matches[0], MatchPos { line: 0, start: 0, end: 1 });
+        assert_eq!(
+            matches[0],
+            MatchPos {
+                line: 0,
+                start: 0,
+                end: 1
+            }
+        );
     }
 
     #[test]

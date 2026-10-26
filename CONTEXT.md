@@ -1,5 +1,5 @@
 # zeno
-یسبس
+
 A fast, non-modal terminal text editor built to replace nano: open a file instantly, edit it with real editing power, save, and quit. It ships as a single native binary per operating system and opens files of any size without perceptible delay.
 
 ## Language

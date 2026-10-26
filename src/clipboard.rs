@@ -29,8 +29,7 @@ pub fn osc52(text: &str) -> Option<String> {
 /// Hand-written because it is twenty lines and the alternative is a
 /// dependency compiled into a binary whose whole point is starting fast.
 pub fn base64(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
         let b = [
@@ -85,7 +84,10 @@ mod tests {
     #[test]
     fn a_payload_over_the_terminal_limit_is_refused() {
         let text = "x".repeat(MAX_PAYLOAD);
-        assert!(osc52(&text).is_none(), "a payload past the cap must not be sent");
+        assert!(
+            osc52(&text).is_none(),
+            "a payload past the cap must not be sent"
+        );
         assert!(osc52("short text").is_some());
     }
 

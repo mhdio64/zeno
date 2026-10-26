@@ -20,6 +20,10 @@
 pub enum Purpose {
     GoToLine,
     Search,
+    /// The pattern to look for, before asking what to put in its place.
+    Replace,
+    /// The text to put in the pattern's place.
+    ReplaceWith,
     ChangedOnDisk,
 }
 
@@ -29,6 +33,8 @@ impl Purpose {
         match self {
             Purpose::GoToLine => "Go to line: ",
             Purpose::Search => "Find: ",
+            Purpose::Replace => "Replace: ",
+            Purpose::ReplaceWith => "With: ",
             Purpose::ChangedOnDisk => "Changed on disk",
         }
     }
@@ -233,7 +239,7 @@ impl Prompt {
 mod tests {
     use super::*;
 
-    const OPTIONS: &[(char, &'static str)] = &[('r', "reload"), ('o', "overwrite"), ('c', "cancel")];
+    const OPTIONS: &[(char, &str)] = &[('r', "reload"), ('o', "overwrite"), ('c', "cancel")];
 
     fn typed(text: &str) -> Prompt {
         let mut prompt = Prompt::input(Purpose::GoToLine);
@@ -314,7 +320,10 @@ mod tests {
     fn a_caret_over_non_ascii_text_moves_one_character() {
         let mut prompt = typed("سلام");
         assert_eq!(prompt.cursor(), 4, "four characters, not eight bytes");
-        assert!(prompt.backspace(), "removes the last character, not the last byte");
+        assert!(
+            prompt.backspace(),
+            "removes the last character, not the last byte"
+        );
         assert_eq!(prompt.text(), "سلا");
         assert_eq!(prompt.cursor(), 3);
     }

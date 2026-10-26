@@ -81,12 +81,12 @@ impl History {
     pub fn record(&mut self, edit: Edit) {
         // A new edit invalidates anything that was undone.
         self.redo.clear();
-        if let Some(last) = self.undo.last_mut() {
-            if edit.continues(last) {
-                last.inserted.push_str(&edit.inserted);
-                last.inserted_end = edit.inserted_end;
-                return;
-            }
+        if let Some(last) = self.undo.last_mut()
+            && edit.continues(last)
+        {
+            last.inserted.push_str(&edit.inserted);
+            last.inserted_end = edit.inserted_end;
+            return;
         }
         self.undo.push(edit);
     }

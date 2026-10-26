@@ -82,11 +82,11 @@ fn main() -> ExitCode {
 
     for case in &cases {
         let path = opts.data_dir.join(&case.name);
-        if !opts.skip_generate {
-            if let Err(e) = generate(&path, case) {
-                eprintln!("zeno-bench: cannot generate {}: {e}", path.display());
-                return ExitCode::FAILURE;
-            }
+        if !opts.skip_generate
+            && let Err(e) = generate(&path, case)
+        {
+            eprintln!("zeno-bench: cannot generate {}: {e}", path.display());
+            return ExitCode::FAILURE;
         }
         if !path.exists() {
             eprintln!("zeno-bench: {} is missing", path.display());
@@ -114,28 +114,27 @@ fn main() -> ExitCode {
         // Process launch to first frame, measured from the outside. The first
         // launch also pays for loading the binary itself, so it is repeated
         // and the second run is the one that counts.
-        let launch = editor
-            .as_ref()
-            .and_then(|bin| measure_launch(bin, &path));
+        let launch = editor.as_ref().and_then(|bin| measure_launch(bin, &path));
 
         write_row(&mut report, case, &cold, &warm, launch.as_ref());
         check(&mut failures, case, &cold, true);
         check(&mut failures, case, &warm, false);
 
-        if line_rich.as_ref().is_none_or(|(_, lines)| warm.lines > *lines) {
+        if line_rich
+            .as_ref()
+            .is_none_or(|(_, lines)| warm.lines > *lines)
+        {
             line_rich = Some((case.name.clone(), warm.lines));
         }
 
         // Where does the cold cost go? Measured on a second, equally fresh
         // file so that the breakdown is not polluted by the passes above.
-        let probe_path = opts
-            .data_dir
-            .join(format!("{}.probe", case.name));
-        if !opts.skip_generate {
-            if let Err(e) = generate(&probe_path, case) {
-                eprintln!("zeno-bench: cannot generate {}: {e}", probe_path.display());
-                return ExitCode::FAILURE;
-            }
+        let probe_path = opts.data_dir.join(format!("{}.probe", case.name));
+        if !opts.skip_generate
+            && let Err(e) = generate(&probe_path, case)
+        {
+            eprintln!("zeno-bench: cannot generate {}: {e}", probe_path.display());
+            return ExitCode::FAILURE;
         }
         if let Ok(b) = probe_cold(&probe_path) {
             write_breakdown(&mut breakdown_report, case, &b);
@@ -330,13 +329,14 @@ fn highlight_probe(data_dir: &Path, failures: &mut Vec<String>) -> Result<String
     // it costs as much as the walk, the checkpoints are being thrown away and
     // every scroll re-parses the file from line 1.
     let deep_after_edit_again = colour_window(&mut h, &doc, deep + 2);
-    if let (Some(walk), Some(again)) = (deep_after_edit, deep_after_edit_again) {
-        if walk > 200.0 && again > walk / 4.0 {
-            failures.push(format!(
-                "highlight probe: re-colouring after an edit took {again:.0} ms against \
+    if let (Some(walk), Some(again)) = (deep_after_edit, deep_after_edit_again)
+        && walk > 200.0
+        && again > walk / 4.0
+    {
+        failures.push(format!(
+            "highlight probe: re-colouring after an edit took {again:.0} ms against \
                  {walk:.0} ms for the full walk — checkpoints are not being reused"
-            ));
-        }
+        ));
     }
 
     // What the editor pays to ask. `request` clones the snapshot the worker
@@ -536,7 +536,10 @@ fn measure_launch(bin: &Path, path: &Path) -> Option<f64> {
         if !output.status.success() {
             return None;
         }
-        let inner: f64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+        let inner: f64 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .ok()?;
         result = Some(wall - inner);
     }
     result
@@ -601,7 +604,8 @@ impl Options {
             match args[i].as_str() {
                 "--data-dir" => {
                     i += 1;
-                    data_dir = PathBuf::from(args.get(i).ok_or("--data-dir needs a value")?.clone());
+                    data_dir =
+                        PathBuf::from(args.get(i).ok_or("--data-dir needs a value")?.clone());
                 }
                 "--sizes" => {
                     i += 1;

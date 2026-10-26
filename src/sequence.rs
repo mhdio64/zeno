@@ -7,7 +7,7 @@
 //! A sequence is a chord, not a mode. Nothing about editing changes while one
 //! is pending, and the next key either completes the sequence or abandons it.
 
-use crate::motion::Motion;
+use crate::motion::{Motion, Object};
 
 /// A command that needs no argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,10 +18,89 @@ pub enum Command {
     Undo,
     Redo,
     ToggleGutter,
+    ToggleRelativeGutter,
+    ToggleWordWrap,
     GoToLine,
     Find,
+    Replace,
     NextMatch,
     PreviousMatch,
+    /// Puts one indent level in front of the cursor's line.
+    IndentLine,
+    /// Takes one indent level off the front of the cursor's line.
+    UnindentLine,
+    /// Comments the touched lines, or uncomments them (`Ctrl+/`).
+    ///
+    /// It has no leader mnemonic of its own: the chord is the binding, and
+    /// the palette reaches it through this name.
+    ToggleLineComment,
+    /// The help list (`Leader ?`).
+    Help,
+    /// The command palette (`F1`, `Leader p`).
+    Palette,
+}
+
+impl Command {
+    /// The name `zeno.toml` uses for this command.
+    pub fn name(self) -> &'static str {
+        match self {
+            Command::Save => "save",
+            Command::Quit => "quit",
+            Command::ForceQuit => "force_quit",
+            Command::Undo => "undo",
+            Command::Redo => "redo",
+            Command::ToggleGutter => "toggle_line_numbers",
+            Command::ToggleRelativeGutter => "toggle_relative_line_numbers",
+            Command::ToggleWordWrap => "toggle_word_wrap",
+            Command::GoToLine => "go_to_line",
+            Command::Find => "find",
+            Command::Replace => "replace",
+            Command::NextMatch => "next_match",
+            Command::PreviousMatch => "previous_match",
+            Command::IndentLine => "indent_line",
+            Command::UnindentLine => "unindent_line",
+            Command::ToggleLineComment => "toggle_line_comment",
+            Command::Help => "help",
+            Command::Palette => "palette",
+        }
+    }
+
+    /// The command a name stands for.
+    ///
+    /// Spaces, dashes and underscores are the same separator, so `go to line`,
+    /// `go-to-line` and `go_to_line` are one name: the point is that a person
+    /// writing a config file should not have to guess the spelling.
+    pub fn from_name(name: &str) -> Option<Self> {
+        let normalised: String = name
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c == ' ' || c == '-' { '_' } else { c })
+            .collect();
+        Some(match normalised.as_str() {
+            "save" => Command::Save,
+            "quit" => Command::Quit,
+            "force_quit" | "quit_without_saving" => Command::ForceQuit,
+            "undo" => Command::Undo,
+            "redo" => Command::Redo,
+            "toggle_line_numbers" | "line_numbers" => Command::ToggleGutter,
+            "toggle_relative_line_numbers" | "relative_line_numbers" => {
+                Command::ToggleRelativeGutter
+            }
+            "toggle_word_wrap" | "word_wrap" => Command::ToggleWordWrap,
+            "go_to_line" | "goto_line" => Command::GoToLine,
+            "find" => Command::Find,
+            "replace" => Command::Replace,
+            "next_match" => Command::NextMatch,
+            "previous_match" => Command::PreviousMatch,
+            "indent_line" => Command::IndentLine,
+            "unindent_line" => Command::UnindentLine,
+            "toggle_line_comment" | "comment" => Command::ToggleLineComment,
+            "help" => Command::Help,
+            "palette" | "command_palette" => Command::Palette,
+            _ => return None,
+        })
+    }
 }
 
 /// The half of a two-part sequence that says what happens to a range.
@@ -31,6 +110,10 @@ pub enum Operator {
     Change,
     Yank,
     Select,
+    /// Adds one indent level to every line the range touches.
+    Indent,
+    /// Removes one indent level from every line the range touches.
+    Unindent,
 }
 
 impl Operator {
@@ -41,6 +124,8 @@ impl Operator {
             Operator::Change => "change",
             Operator::Yank => "yank",
             Operator::Select => "select",
+            Operator::Indent => "indent",
+            Operator::Unindent => "unindent",
         }
     }
 }
@@ -51,6 +136,11 @@ pub enum Target {
     Motion(Motion),
     /// The line the cursor is on, terminator included.
     Line,
+    /// A text object: `i` selects inside it, `a` selects around it.
+    Object {
+        object: Object,
+        around: bool,
+    },
 }
 
 /// A complete sequence.
@@ -62,6 +152,10 @@ pub enum Action {
         target: Target,
         count: u32,
     },
+    /// Remember the cursor's position under a name (`Leader m <mark>`).
+    SetMark(char),
+    /// Return to the position remembered under a name (`Leader ' <mark>`).
+    JumpToMark(char),
 }
 
 /// What a fed key produced.
@@ -86,6 +180,15 @@ enum Stage {
     Idle,
     Leader,
     Operator(Operator),
+    /// Waiting for the object after `i` or `a`.
+    Object {
+        operator: Operator,
+        around: bool,
+    },
+    /// Waiting for the mark's name, after `m` or `'`.
+    Mark {
+        set: bool,
+    },
 }
 
 /// The leader-sequence state machine.
@@ -140,6 +243,19 @@ impl Sequences {
             }
             Stage::Leader => self.feed_leader(key),
             Stage::Operator(operator) => self.feed_operator(operator, key),
+            Stage::Object { operator, around } => self.feed_object(operator, around, key),
+            Stage::Mark { set } => {
+                self.cancel();
+                if is_mark(key) {
+                    Step::Action(if set {
+                        Action::SetMark(key)
+                    } else {
+                        Action::JumpToMark(key)
+                    })
+                } else {
+                    Step::Cancelled
+                }
+            }
         }
     }
 
@@ -156,10 +272,17 @@ impl Sequences {
             'u' => Some(Command::Undo),
             'U' => Some(Command::Redo),
             ',' => Some(Command::ToggleGutter),
+            '.' => Some(Command::ToggleRelativeGutter),
+            'w' => Some(Command::ToggleWordWrap),
             'g' => Some(Command::GoToLine),
             'f' => Some(Command::Find),
+            'r' => Some(Command::Replace),
             'n' => Some(Command::NextMatch),
             'N' => Some(Command::PreviousMatch),
+            ']' => Some(Command::IndentLine),
+            '[' => Some(Command::UnindentLine),
+            '?' => Some(Command::Help),
+            'p' => Some(Command::Palette),
             _ => None,
         };
         if let Some(command) = command {
@@ -167,11 +290,20 @@ impl Sequences {
             return Step::Action(Action::Command(command));
         }
 
+        // `m <mark>` names a spot; `' <mark>` returns to it. The name is
+        // collected by the next key, whichever it is.
+        if key == 'm' || key == '\'' {
+            self.stage = Stage::Mark { set: key == 'm' };
+            return Step::Pending("mark: which one?");
+        }
+
         let operator = match key {
             'd' => Some(Operator::Delete),
             'c' => Some(Operator::Change),
             'y' => Some(Operator::Yank),
             'v' => Some(Operator::Select),
+            '>' => Some(Operator::Indent),
+            '<' => Some(Operator::Unindent),
             _ => None,
         };
         match operator {
@@ -186,7 +318,34 @@ impl Sequences {
         }
     }
 
+    /// Collects the object's name, after `i` or `a`.
+    fn feed_object(&mut self, operator: Operator, around: bool, key: char) -> Step {
+        let count = self.count.max(1);
+        self.cancel();
+        match object_of(key) {
+            Some(object) => Step::Action(Action::Apply {
+                operator,
+                target: Target::Object { object, around },
+                count,
+            }),
+            None => Step::Cancelled,
+        }
+    }
+
     fn feed_operator(&mut self, operator: Operator, key: char) -> Step {
+        // `i` selects inside a text object and `a` around it, so the
+        // operator's next key is a name rather than a motion.
+        if key == 'i' || key == 'a' {
+            self.stage = Stage::Object {
+                operator,
+                around: key == 'a',
+            };
+            return Step::Pending(if key == 'a' {
+                "around what?"
+            } else {
+                "inside what?"
+            });
+        }
         // Repeating the operator means the line, the way `dd` and `yy` do.
         let target = if repeats(operator, key) {
             Some(Target::Line)
@@ -211,11 +370,21 @@ impl Sequences {
     }
 }
 
+/// Whether `key` can name a mark.
+///
+/// Letters and digits: enough names for any file, and every one of them is
+/// a key the hand can find without looking.
+fn is_mark(key: char) -> bool {
+    key.is_ascii_alphanumeric()
+}
+
 fn repeats(operator: Operator, key: char) -> bool {
     match operator {
         Operator::Delete => key == 'd',
         Operator::Change => key == 'c',
         Operator::Yank => key == 'y',
+        Operator::Indent => key == '>',
+        Operator::Unindent => key == '<',
         // Selecting the line is what `Shift+Down` already does; a repeated
         // `v` has nothing left to mean.
         Operator::Select => false,
@@ -228,15 +397,38 @@ fn pending_hint(operator: Operator) -> &'static str {
         Operator::Change => "change: motion?",
         Operator::Yank => "yank: motion?",
         Operator::Select => "select: motion?",
+        Operator::Indent => "indent: motion?",
+        Operator::Unindent => "unindent: motion?",
     }
+}
+
+/// The text object a mnemonic names.
+fn object_of(key: char) -> Option<Object> {
+    Some(match key {
+        'w' => Object::Word,
+        'W' => Object::BigWord,
+        'l' => Object::Line,
+        'p' => Object::Paragraph,
+        's' => Object::Sentence,
+        '(' | ')' => Object::Paren,
+        '[' | ']' => Object::Bracket,
+        '{' | '}' => Object::Brace,
+        '"' => Object::DoubleQuote,
+        '\'' => Object::SingleQuote,
+        '`' => Object::Backtick,
+        't' => Object::Tag,
+        _ => return None,
+    })
 }
 
 /// The motion a mnemonic names.
 ///
-/// Only motions that stay near the cursor are here. A motion that can name a
-/// multi-thousand-line range (`G`, `gg`, `}`) is deliberately absent until the
-/// overlay stops paying a superlinear price for such a deletion; see
-/// `docs/performance.md`.
+/// A landmark motion (`}` , `%`) can name a long range in a file with no
+/// blanks or brackets in it, so the sequence accepts it and the editor
+/// refuses the *range* at the moment it is applied, with a message, once it
+/// crosses the affordable span — see `Editor::range_is_affordable`. A motion
+/// that names a whole-file range by definition (`G`, `gg`) stays absent:
+/// there is no reachable range it could ever be allowed to edit.
 fn motion_of(key: char) -> Option<Motion> {
     Some(match key {
         'h' => Motion::Left,
@@ -252,6 +444,11 @@ fn motion_of(key: char) -> Option<Motion> {
         '$' => Motion::LineEnd,
         '0' => Motion::LineStart,
         '^' => Motion::FirstNonBlank,
+        '}' => Motion::ParagraphForward,
+        '{' => Motion::ParagraphBack,
+        ')' => Motion::SentenceForward,
+        '(' => Motion::SentenceBack,
+        '%' => Motion::MatchingBracket,
         _ => return None,
     })
 }
@@ -280,26 +477,84 @@ mod tests {
     }
 
     #[test]
+    fn a_command_has_a_name_and_answers_to_it() {
+        assert_eq!(Command::ToggleWordWrap.name(), "toggle_word_wrap");
+        assert_eq!(
+            Command::from_name("Toggle Word Wrap"),
+            Some(Command::ToggleWordWrap)
+        );
+        assert_eq!(Command::from_name("goto-line"), Some(Command::GoToLine));
+        assert_eq!(Command::from_name("nonsense"), None);
+    }
+
+    #[test]
+    fn every_command_name_round_trips() {
+        for command in [
+            Command::Save,
+            Command::Quit,
+            Command::ForceQuit,
+            Command::Undo,
+            Command::Redo,
+            Command::ToggleGutter,
+            Command::ToggleRelativeGutter,
+            Command::ToggleWordWrap,
+            Command::GoToLine,
+            Command::Find,
+            Command::Replace,
+            Command::NextMatch,
+            Command::PreviousMatch,
+            Command::IndentLine,
+            Command::UnindentLine,
+            Command::ToggleLineComment,
+            Command::Help,
+            Command::Palette,
+        ] {
+            assert_eq!(
+                Command::from_name(command.name()),
+                Some(command),
+                "{}",
+                command.name()
+            );
+        }
+    }
+
+    #[test]
     fn a_standalone_mnemonic_is_a_command() {
         assert_eq!(run("s"), Step::Action(Action::Command(Command::Save)));
-        assert_eq!(run(","), Step::Action(Action::Command(Command::ToggleGutter)));
+        assert_eq!(
+            run(","),
+            Step::Action(Action::Command(Command::ToggleGutter))
+        );
+        assert_eq!(
+            run("."),
+            Step::Action(Action::Command(Command::ToggleRelativeGutter))
+        );
+    }
+
+    #[test]
+    fn help_and_the_palette_are_standalone_commands() {
+        assert_eq!(run("?"), Step::Action(Action::Command(Command::Help)));
+        assert_eq!(run("p"), Step::Action(Action::Command(Command::Palette)));
+    }
+
+    #[test]
+    fn word_wrap_is_a_standalone_command() {
+        assert_eq!(
+            run("w"),
+            Step::Action(Action::Command(Command::ToggleWordWrap))
+        );
     }
 
     #[test]
     fn the_line_jump_is_a_standalone_command() {
-        assert_eq!(
-            run("g"),
-            Step::Action(Action::Command(Command::GoToLine))
-        );
+        assert_eq!(run("g"), Step::Action(Action::Command(Command::GoToLine)));
     }
 
     #[test]
     fn the_search_mnemonics_are_standalone_commands() {
         assert_eq!(run("f"), Step::Action(Action::Command(Command::Find)));
-        assert_eq!(
-            run("n"),
-            Step::Action(Action::Command(Command::NextMatch))
-        );
+        assert_eq!(run("r"), Step::Action(Action::Command(Command::Replace)));
+        assert_eq!(run("n"), Step::Action(Action::Command(Command::NextMatch)));
         assert_eq!(
             run("N"),
             Step::Action(Action::Command(Command::PreviousMatch))
@@ -310,10 +565,7 @@ mod tests {
     fn an_operator_waits_for_a_motion() {
         let mut seq = Sequences::new();
         seq.start();
-        assert_eq!(
-            seq.feed('d'),
-            Step::Pending("delete: motion?")
-        );
+        assert_eq!(seq.feed('d'), Step::Pending("delete: motion?"));
         assert!(!seq.is_idle());
         assert_eq!(
             seq.feed('w'),
@@ -338,6 +590,85 @@ mod tests {
     }
 
     #[test]
+    fn indent_and_unindent_are_operators_and_commands() {
+        assert_eq!(
+            run(">"),
+            Step::Pending("indent: motion?"),
+            "the operator waits for its motion"
+        );
+        assert_eq!(
+            run(">j"),
+            apply(Operator::Indent, Target::Motion(Motion::Down), 1)
+        );
+        assert_eq!(
+            run("<w"),
+            apply(Operator::Unindent, Target::Motion(Motion::Word), 1)
+        );
+        assert_eq!(run(">>"), apply(Operator::Indent, Target::Line, 1));
+        assert_eq!(run("]"), Step::Action(Action::Command(Command::IndentLine)));
+        assert_eq!(
+            run("["),
+            Step::Action(Action::Command(Command::UnindentLine))
+        );
+    }
+
+    fn object(object: Object, around: bool) -> Step {
+        Step::Action(Action::Apply {
+            operator: Operator::Delete,
+            target: Target::Object { object, around },
+            count: 1,
+        })
+    }
+
+    #[test]
+    fn text_objects_follow_an_operator() {
+        assert_eq!(run("diw"), object(Object::Word, false));
+        assert_eq!(run("daw"), object(Object::Word, true));
+        assert_eq!(run("dil"), object(Object::Line, false));
+        assert_eq!(run("dip"), object(Object::Paragraph, false));
+        assert_eq!(run("dis"), object(Object::Sentence, false));
+        assert_eq!(run("di("), object(Object::Paren, false));
+        assert_eq!(run("da["), object(Object::Bracket, true));
+        assert_eq!(run("di{"), object(Object::Brace, false));
+        assert_eq!(run("di\""), object(Object::DoubleQuote, false));
+        assert_eq!(run("di'"), object(Object::SingleQuote, false));
+        assert_eq!(run("di`"), object(Object::Backtick, false));
+        assert_eq!(run("dat"), object(Object::Tag, true));
+    }
+
+    #[test]
+    fn a_text_object_waits_for_its_name() {
+        let mut seq = Sequences::new();
+        seq.start();
+        assert_eq!(seq.feed('d'), Step::Pending("delete: motion?"));
+        assert_eq!(seq.feed('i'), Step::Pending("inside what?"));
+        assert!(!seq.is_idle(), "the object's name is still being collected");
+        assert_eq!(seq.feed('w'), object(Object::Word, false));
+        assert!(seq.is_idle());
+    }
+
+    #[test]
+    fn a_sequence_that_cannot_name_an_object_cancels() {
+        assert_eq!(run("diz"), Step::Cancelled);
+        assert_eq!(run("caz"), Step::Cancelled);
+    }
+
+    #[test]
+    fn a_text_object_keeps_the_count() {
+        assert_eq!(
+            run("2diw"),
+            Step::Action(Action::Apply {
+                operator: Operator::Delete,
+                target: Target::Object {
+                    object: Object::Word,
+                    around: false
+                },
+                count: 2,
+            })
+        );
+    }
+
+    #[test]
     fn a_count_multiplies_the_motion() {
         assert_eq!(
             run("3dw"),
@@ -355,6 +686,28 @@ mod tests {
     }
 
     #[test]
+    fn a_mark_takes_a_name() {
+        assert_eq!(run("ma"), Step::Action(Action::SetMark('a')));
+        assert_eq!(run("'z"), Step::Action(Action::JumpToMark('z')));
+    }
+
+    #[test]
+    fn a_mark_waits_for_its_name() {
+        let mut seq = Sequences::new();
+        seq.start();
+        assert_eq!(seq.feed('m'), Step::Pending("mark: which one?"));
+        assert!(!seq.is_idle(), "the name is still being collected");
+        assert_eq!(seq.feed('q'), Step::Action(Action::SetMark('q')));
+        assert!(seq.is_idle());
+    }
+
+    #[test]
+    fn a_key_that_cannot_name_a_mark_cancels() {
+        assert_eq!(run("m!"), Step::Cancelled);
+        assert_eq!(run("' "), Step::Cancelled);
+    }
+
+    #[test]
     fn an_unknown_mnemonic_cancels() {
         assert_eq!(run("z"), Step::Cancelled);
     }
@@ -366,8 +719,36 @@ mod tests {
 
     #[test]
     fn a_motion_outside_the_current_set_cancels() {
-        // `G` would name a range the overlay cannot delete cheaply yet.
+        // `G` would name a whole-file range the overlay cannot delete at all.
         assert_eq!(run("dG"), Step::Cancelled);
+    }
+
+    #[test]
+    fn landmark_motions_are_operator_targets() {
+        assert_eq!(
+            run("d}"),
+            apply(
+                Operator::Delete,
+                Target::Motion(Motion::ParagraphForward),
+                1
+            )
+        );
+        assert_eq!(
+            run("y{"),
+            apply(Operator::Yank, Target::Motion(Motion::ParagraphBack), 1)
+        );
+        assert_eq!(
+            run("c)"),
+            apply(Operator::Change, Target::Motion(Motion::SentenceForward), 1)
+        );
+        assert_eq!(
+            run("v("),
+            apply(Operator::Select, Target::Motion(Motion::SentenceBack), 1)
+        );
+        assert_eq!(
+            run("d%"),
+            apply(Operator::Delete, Target::Motion(Motion::MatchingBracket), 1)
+        );
     }
 
     #[test]
@@ -380,7 +761,7 @@ mod tests {
         assert_eq!(seq.count(), 0);
         seq.start();
         assert_eq!(
-            seq.feed('w'),
+            seq.feed('k'),
             Step::Cancelled,
             "a bare motion is not a command"
         );

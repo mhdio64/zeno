@@ -10,8 +10,8 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
 
-use crate::doc::edit::Pos;
 use crate::doc::Doc;
+use crate::doc::edit::Pos;
 use crate::highlight::Highlighted;
 use crate::search::Pattern;
 
@@ -20,12 +20,26 @@ use crate::search::Pattern;
 pub struct ViewState {
     /// First line shown in the viewport.
     pub top_line: u64,
+    /// First *visual* row of `top_line` shown, when wrapping is on.
+    ///
+    /// A wrapped line can be taller than the screen, so a line alone cannot
+    /// say where the viewport starts. Unwrapped, this is always zero.
+    pub top_row: usize,
+    /// Whether long lines are wrapped at the right edge instead of scrolled.
+    ///
+    /// Off by default: a scroll is cheaper than laying a line out, and an
+    /// editor whose first job is to feel instant should not pay for a
+    /// feature nobody asked for until they ask (spec §4.5).
+    pub word_wrap: bool,
     /// Line the cursor is on.
     pub cursor_line: u64,
     /// Column the cursor is at, counted in characters.
     pub cursor_col: usize,
     /// Whether the line-number gutter is drawn.
     pub show_line_numbers: bool,
+    /// Whether the gutter shows distances from the cursor instead of
+    /// absolute line numbers (the cursor's own line still shows absolute).
+    pub show_relative_numbers: bool,
     /// Width of the viewport in columns, excluding the gutter.
     pub width: u16,
     /// First column of text shown in the viewport.
@@ -51,9 +65,12 @@ impl Default for ViewState {
     fn default() -> Self {
         Self {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 0,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 80,
             left_col: 0,
             anchor: None,
@@ -195,20 +212,26 @@ impl View<'_> {
         // the search match and the selection say what the user is looking
         // at, and those win.
         for (start, end, style) in syntax {
-            for col in *start..(*end).min(chars.len()) {
-                styles[col] = styles[col].patch(*style);
+            let start = (*start).min(chars.len());
+            let end = (*end).clamp(start, chars.len());
+            for slot in &mut styles[start..end] {
+                *slot = (*slot).patch(*style);
             }
         }
         for (start, end) in matches {
-            for col in *start..(*end).min(chars.len()) {
-                styles[col] = match_style();
+            let start = (*start).min(chars.len());
+            let end = (*end).clamp(start, chars.len());
+            for slot in &mut styles[start..end] {
+                *slot = match_style();
             }
         }
         // The selection wins over the search match: it is what the user has
         // just made, and one highlight is easier to read than two.
         if let Some((from, to)) = selection {
-            for col in from..to.min(chars.len()) {
-                styles[col] = selection_style();
+            let from = from.min(chars.len());
+            let to = to.clamp(from, chars.len());
+            for slot in &mut styles[from..to] {
+                *slot = selection_style();
             }
         }
 
@@ -235,12 +258,18 @@ impl View<'_> {
     /// follow it, so this only happens in the frame between a resize and
     /// the scroll that answers it.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
+        let gutter = self.gutter_width();
+        let body_width = area.width.saturating_sub(gutter);
+        if body_width == 0 {
+            return None;
+        }
+        if self.state.word_wrap {
+            return self.wrapped_cursor_position(area, gutter, body_width);
+        }
         let row = self.state.cursor_line.checked_sub(self.state.top_line)?;
         if row >= area.height as u64 {
             return None;
         }
-        let gutter = self.gutter_width();
-        let body_width = area.width.saturating_sub(gutter);
         // `cursor_col` is the character column: the editor keeps it inside
         // the line, and walking the line to count it again would cost a
         // keystroke's worth of work on a line with a million characters.
@@ -252,6 +281,178 @@ impl View<'_> {
         let x = area.x + gutter + (col - left) as u16;
         Some((x, area.y + row as u16))
     }
+
+    /// Where the cursor is when the viewport wraps.
+    ///
+    /// The row is counted from the top of the viewport, so a line taller than
+    /// the screen is laid out only as far as it is needed.
+    fn wrapped_cursor_position(
+        &self,
+        area: Rect,
+        gutter: u16,
+        body_width: u16,
+    ) -> Option<(u16, u16)> {
+        let width = body_width as usize;
+        let mut row = 0usize;
+        let mut line = self.state.top_line;
+        while line < self.state.cursor_line {
+            row += wrapped_row_count(&self.chars_of(line), width);
+            line += 1;
+        }
+        let chars = self.chars_of(self.state.cursor_line);
+        let (within, col) = wrapped_position(&chars, width, self.state.cursor_col);
+        row += within;
+        let row = row.checked_sub(self.state.top_row)?;
+        if row >= area.height as usize {
+            return None;
+        }
+        Some((area.x + gutter + col as u16, area.y + row as u16))
+    }
+
+    /// The characters of one line.
+    ///
+    /// Wrapping has to know where the spaces are, so it needs the line in
+    /// hand; every caller that pays this is bounded by the viewport height.
+    fn chars_of(&self, line: u64) -> Vec<char> {
+        self.doc
+            .line_text(line)
+            .map(|text| text.chars().collect())
+            .unwrap_or_default()
+    }
+
+    /// The rows that fill `height` screen rows, from the top of the viewport.
+    ///
+    /// The second half of each entry says whether the row starts a line: only
+    /// that row carries a line number, because the next one is still the same
+    /// line.
+    fn layout_rows(&self, width: usize, height: u16) -> Vec<(Row, bool)> {
+        let capacity = height as usize;
+        let mut rows: Vec<(Row, bool)> = Vec::with_capacity(capacity);
+        if !self.state.word_wrap {
+            for offset in 0..height as u64 {
+                rows.push((
+                    Row {
+                        line: self.state.top_line + offset,
+                        start: self.state.left_col,
+                        end: self.state.left_col + width,
+                    },
+                    true,
+                ));
+            }
+            return rows;
+        }
+        let mut line = self.state.top_line;
+        let mut skip = self.state.top_row;
+        while rows.len() < capacity {
+            if self.doc.line_text(line).is_none() {
+                break;
+            }
+            let chars = self.chars_of(line);
+            let starts = wrap_segments(&chars, width);
+            for (index, start) in starts.iter().enumerate() {
+                if index < skip {
+                    continue;
+                }
+                let end = starts.get(index + 1).copied().unwrap_or(chars.len());
+                rows.push((
+                    Row {
+                        line,
+                        start: *start,
+                        end,
+                    },
+                    index == 0,
+                ));
+                if rows.len() == capacity {
+                    break;
+                }
+            }
+            line += 1;
+            skip = 0;
+        }
+        rows
+    }
+}
+
+/// One screen row: a line, and the column it starts at on screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    pub line: u64,
+    /// First character column of the line shown on this row.
+    pub start: usize,
+    /// One past the last column shown, so a wrapped row stops where its
+    /// segment ends instead of running into the next one.
+    pub end: usize,
+}
+
+/// The character columns a wrapped line is cut at: one entry per screen row.
+///
+/// A segment ends after the last space that fits, so words stay whole; a word
+/// wider than the screen is broken, because there is nothing else to do about
+/// it. A line that ends exactly at the right edge gets one empty row after it,
+/// which is where the cursor sits when it is at the end of that line.
+pub fn wrap_segments(chars: &[char], width: usize) -> Vec<usize> {
+    let width = width.max(1);
+    let mut starts = vec![0];
+    let mut start = 0;
+    while start < chars.len() {
+        let end = wrap_end(chars, start, width);
+        if end >= chars.len() {
+            break;
+        }
+        starts.push(end);
+        start = end;
+    }
+    if chars.len() - *starts.last().expect("always one segment") == width {
+        starts.push(chars.len());
+    }
+    starts
+}
+
+/// Where one wrapped row of a line ends.
+fn wrap_end(chars: &[char], start: usize, width: usize) -> usize {
+    let limit = (start + width).min(chars.len());
+    if limit >= chars.len() {
+        return chars.len();
+    }
+    // A space right past the edge is the natural place to break: the row is
+    // exactly one screen wide and ends with a whole word.
+    if chars[limit] == ' ' {
+        return limit;
+    }
+    // Break after the last space that fits, so a word is not cut in half.
+    let mut i = limit;
+    while i > start + 1 {
+        i -= 1;
+        if chars[i] == ' ' {
+            return i + 1;
+        }
+    }
+    limit
+}
+
+/// How many screen rows `chars` takes when wrapped at `width`.
+pub fn wrapped_row_count(chars: &[char], width: usize) -> usize {
+    wrap_segments(chars, width).len()
+}
+
+/// Which row of a wrapped line `col` falls on, and its column within that row.
+pub fn wrapped_position(chars: &[char], width: usize, col: usize) -> (usize, usize) {
+    let starts = wrap_segments(chars, width);
+    let mut row = 0;
+    for (i, start) in starts.iter().enumerate() {
+        if *start <= col {
+            row = i;
+        } else {
+            break;
+        }
+    }
+    (row, col.saturating_sub(starts[row]))
+}
+
+/// Where a wrapped row starts, in the line's own columns.
+pub fn wrapped_row_start(chars: &[char], width: usize, row: usize) -> usize {
+    let starts = wrap_segments(chars, width);
+    starts[row.min(starts.len() - 1)]
 }
 
 /// The text of a line from `behind` characters before the visible window.
@@ -342,12 +543,21 @@ impl Widget for View<'_> {
         let mut gutter_lines: Vec<Line> = Vec::with_capacity(area.height as usize);
         let mut body_lines: Vec<Line> = Vec::with_capacity(area.height as usize);
 
-        for row in 0..area.height as u64 {
-            let line_no = self.state.top_line + row;
+        for (row, starts_line) in self.layout_rows(body_width as usize, area.height) {
+            let line_no = row.line;
             let is_cursor = line_no == self.state.cursor_line;
 
             if self.state.show_line_numbers {
-                let label = format!("{:>width$}", line_no + 1, width = gutter as usize - 1);
+                // A wrapped line carries its number only on its first row:
+                // the rows under it are still the same line.
+                let label = if !starts_line {
+                    String::new()
+                } else if self.state.show_relative_numbers && !is_cursor {
+                    let distance = line_no.abs_diff(self.state.cursor_line);
+                    format!("{:>width$}", distance, width = gutter as usize - 1)
+                } else {
+                    format!("{:>width$}", line_no + 1, width = gutter as usize - 1)
+                };
                 let style = if is_cursor {
                     gutter_style().add_modifier(Modifier::REVERSED)
                 } else {
@@ -360,13 +570,14 @@ impl Widget for View<'_> {
             // with one enormous line must not cost more to draw than a file
             // with ten thousand short ones.
             let text = self.doc.line_text(line_no).unwrap_or_default();
-            let left = self.state.left_col;
+            let left = row.start;
             // The head of the line reaches back before the window, so that a
             // match crossing the left edge is still found.
             let behind = left.saturating_sub(MATCH_LOOKBEHIND);
             let head = head_of(&text, behind);
             let window = skip_chars(head, left - behind);
-            let clipped: String = window.chars().take(body_width as usize).collect();
+            let shown = (row.end - row.start).min(body_width as usize);
+            let clipped: String = window.chars().take(shown).collect();
             // While a selection is showing, the cursor line loses its own
             // highlight: two reverse-video ranges on one line are impossible
             // to tell apart, and the selection is the more useful of the two.
@@ -385,13 +596,9 @@ impl Widget for View<'_> {
             });
             let matches = self.match_ranges_in(head, left - behind, painted);
             let syntax = self.syntax_spans(line_no, left, painted);
-            body_lines.push(Line::from(self.styled_spans(
-                &clipped,
-                base,
-                &syntax,
-                selection,
-                &matches,
-            )));
+            body_lines.push(Line::from(
+                self.styled_spans(&clipped, base, &syntax, selection, &matches),
+            ));
         }
 
         if self.state.show_line_numbers {
@@ -418,8 +625,8 @@ impl Widget for View<'_> {
 mod tests {
     use super::*;
     use crate::highlight::{Highlighted, LineSpan};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn doc_of(name: &str, contents: &[u8]) -> Doc {
         use std::io::Write;
@@ -436,7 +643,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc, state, highlight: None };
+                let view = View {
+                    doc,
+                    state,
+                    highlight: None,
+                };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -452,13 +663,47 @@ mod tests {
     }
 
     #[test]
+    fn relative_numbers_show_distance_from_the_cursor() {
+        let doc = doc_of("relative.txt", b"alpha\nbeta\ngamma\ndelta\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 2,
+            cursor_col: 0,
+            show_line_numbers: true,
+            show_relative_numbers: true,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let text = frame_text(&doc, &state, 20, 4);
+        let rows: Vec<&str> = text.split('\n').collect();
+        // Line 0 (row 0): distance from cursor line 2 is 2.
+        assert!(rows[0].trim_start().starts_with('2'), "{text}");
+        // Line 1: distance 1.
+        assert!(rows[1].trim_start().starts_with('1'), "{text}");
+        // Line 2 is the cursor: absolute number, 1-based → 3.
+        assert!(rows[2].trim_start().starts_with('3'), "{text}");
+        // Line 3: distance 1.
+        assert!(rows[3].trim_start().starts_with('1'), "{text}");
+        // The absolute file line count (4) never appears as a label for a
+        // non-cursor row — every non-cursor label is a distance.
+        assert!(!rows[0].contains('4'), "{text}");
+    }
+
+    #[test]
     fn renders_gutter_and_text() {
         let doc = doc_of("gutter.txt", b"alpha\nbeta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 0,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
@@ -474,9 +719,12 @@ mod tests {
         let doc = doc_of("scroll.txt", b"one\ntwo\nthree\n");
         let state = ViewState {
             top_line: 2,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 2,
             cursor_col: 0,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
@@ -492,34 +740,48 @@ mod tests {
         let doc = doc_of("selection.txt", b"abcdef\nsecond\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 4,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         assert_eq!(view.selection_span(0), Some((1, 4)));
-        assert_eq!(view.selection_span(1), None, "the other line is not selected");
+        assert_eq!(
+            view.selection_span(1),
+            None,
+            "the other line is not selected"
+        );
 
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state, highlight: None };
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                };
                 f.render_widget(view, f.area());
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let reversed = |x: u16| {
-            buffer[(4 + x, 0)]
-                .modifier
-                .contains(Modifier::REVERSED)
-        };
+        let reversed = |x: u16| buffer[(4 + x, 0)].modifier.contains(Modifier::REVERSED);
         assert!(!reversed(0), "'a' is outside the selection");
-        assert!(reversed(1) && reversed(2) && reversed(3), "'bcd' is selected");
+        assert!(
+            reversed(1) && reversed(2) && reversed(3),
+            "'bcd' is selected"
+        );
         assert!(!reversed(4), "'e' is past the selection");
     }
 
@@ -528,15 +790,22 @@ mod tests {
         let doc = doc_of("selection-lines.txt", b"one\ntw\nthree\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 2,
             cursor_col: 2,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(view.selection_span(1), Some((0, 2)));
         assert_eq!(view.selection_span(2), Some((0, 2)));
@@ -547,15 +816,22 @@ mod tests {
         let doc = doc_of("selection-edge.txt", b"one\ntwo\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 1,
             cursor_col: 0,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(
             view.selection_span(1),
@@ -569,9 +845,12 @@ mod tests {
         let doc = doc_of("highlight.txt", b"alpha beta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 1,
             cursor_col: 0,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
@@ -581,7 +860,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state, highlight: None };
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -601,9 +884,12 @@ mod tests {
         let doc = doc_of("highlight-selection.txt", b"alpha beta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 8,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: Some(Pos::new(0, 6)),
@@ -613,7 +899,11 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state, highlight: None };
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                };
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -639,15 +929,22 @@ mod tests {
         let doc = doc_of("highlight-edge.txt", b"x\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 0,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
         };
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         assert!(view.match_ranges(0, 20).is_empty());
     }
 
@@ -656,15 +953,22 @@ mod tests {
         let doc = doc_of("cursor.txt", b"alpha\nbeta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 1,
             cursor_col: 2,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
         };
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         let area = Rect::new(0, 0, 20, 3);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 1);
@@ -676,9 +980,12 @@ mod tests {
     fn scrolled(left_col: usize, cursor_col: usize) -> ViewState {
         ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col,
             show_line_numbers: true,
+            show_relative_numbers: false,
             width: 20,
             left_col,
             anchor: None,
@@ -712,16 +1019,16 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View { doc: &doc, state: &state, highlight: None };
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                };
                 f.render_widget(view, f.area());
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let reversed = |x: u16| {
-            buffer[(4 + x, 0)]
-                .modifier
-                .contains(Modifier::REVERSED)
-        };
+        let reversed = |x: u16| buffer[(4 + x, 0)].modifier.contains(Modifier::REVERSED);
         // The selection runs from column 12 to 18, and the window starts at
         // column 10, so it is painted five columns further right.
         assert!(!reversed(0), "column 10 is outside the selection");
@@ -734,7 +1041,11 @@ mod tests {
         let doc = doc_of("scroll-match.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let mut state = scrolled(12, 0);
         state.highlight_pattern = Some(Pattern::compile("klm").expect("a valid pattern"));
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         // "klm" sits at columns 10 to 13 and the window starts at 12, so
         // only its last character is on screen.
         assert_eq!(view.match_ranges(0, 20), vec![(0, 1)]);
@@ -747,7 +1058,11 @@ mod tests {
         let doc = doc_of("scroll-far.txt", format!("{line}\n").as_bytes());
         let mut state = scrolled(100, 0);
         state.highlight_pattern = Some(Pattern::compile("needle").expect("a valid pattern"));
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         assert!(
             view.match_ranges(0, 20).is_empty(),
             "the match is further behind the edge than the scan looks"
@@ -758,7 +1073,11 @@ mod tests {
     fn the_cursor_sits_at_its_own_column() {
         let doc = doc_of("cursor-scroll.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 15);
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         let area = Rect::new(0, 0, 24, 2);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 0);
@@ -770,7 +1089,11 @@ mod tests {
     fn a_cursor_outside_the_window_is_not_drawn() {
         let doc = doc_of("cursor-off.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 3);
-        let view = View { doc: &doc, state: &state, highlight: None };
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
         let area = Rect::new(0, 0, 24, 2);
         assert!(view.cursor_position(area).is_none());
     }
@@ -809,14 +1132,133 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn wrap_state(width: u16, cursor_line: u64, cursor_col: usize, top_row: usize) -> ViewState {
+        ViewState {
+            top_line: 0,
+            top_row,
+            word_wrap: true,
+            cursor_line,
+            cursor_col,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        }
+    }
+
+    #[test]
+    fn a_wrapped_line_takes_more_than_one_row() {
+        let doc = doc_of("wrap.txt", b"alpha beta gamma delta\nsecond\n");
+        let state = wrap_state(10, 0, 0, 0);
+        let text = frame_text(&doc, &state, 10, 5);
+        let rows: Vec<&str> = text.split('\n').collect();
+        assert_eq!(rows[0].trim_end(), "alpha beta");
+        assert_eq!(rows[1].trim_end(), " gamma");
+        assert_eq!(rows[2].trim_end(), "delta");
+        assert_eq!(rows[3].trim_end(), "second", "the next line follows it");
+    }
+
+    #[test]
+    fn wrap_keeps_words_whole_unless_one_is_wider_than_the_screen() {
+        let doc = doc_of("wrap-long-word.txt", b"abcdefghijklmnop qr\n");
+        let state = wrap_state(10, 0, 0, 0);
+        let text = frame_text(&doc, &state, 10, 3);
+        let rows: Vec<&str> = text.split('\n').collect();
+        assert_eq!(rows[0], "abcdefghij");
+        assert_eq!(rows[1].trim_end(), "klmnop qr");
+    }
+
+    #[test]
+    fn a_wrapped_line_shows_its_number_once() {
+        let doc = doc_of("wrap-gutter.txt", b"alpha beta gamma delta\nsecond\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: true,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: true,
+            show_relative_numbers: false,
+            width: 10,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let text = frame_text(&doc, &state, 16, 5);
+        let rows: Vec<&str> = text.split('\n').collect();
+        assert!(rows[0].trim_start().starts_with('1'), "{text}");
+        assert!(
+            rows[1].chars().take(4).all(|c| c == ' '),
+            "the row under it is still the same line, so its gutter is blank: {text}"
+        );
+        assert!(rows[2].trim_start().starts_with('2'), "{text}");
+    }
+
+    #[test]
+    fn the_cursor_sits_on_the_row_its_column_is_on() {
+        let doc = doc_of("wrap-cursor.txt", b"alpha beta gamma\n");
+        let state = wrap_state(10, 0, 12, 0);
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
+        // Column 12 is on the second row, two columns in: the row starts at
+        // column 10, which holds the space after `beta`.
+        assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((2, 1)));
+    }
+
+    #[test]
+    fn the_cursor_at_the_end_of_a_full_row_moves_to_the_next_one() {
+        let doc = doc_of("wrap-cursor-edge.txt", b"abcdefghij\n");
+        let state = wrap_state(10, 0, 10, 0);
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
+        assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((0, 1)));
+    }
+
+    #[test]
+    fn top_row_scrolls_within_a_wrapped_line() {
+        let doc = doc_of("wrap-scroll.txt", b"alpha beta gamma delta\nsecond\n");
+        let state = wrap_state(10, 1, 0, 2);
+        let text = frame_text(&doc, &state, 10, 3);
+        let rows: Vec<&str> = text.split('\n').collect();
+        assert_eq!(
+            rows[0].trim_end(),
+            "delta",
+            "the first two rows scrolled away"
+        );
+        assert_eq!(rows[1].trim_end(), "second");
+    }
+
+    #[test]
+    fn the_cursor_position_is_measured_from_the_top_row() {
+        let doc = doc_of("wrap-cursor-row.txt", b"alpha beta gamma delta\nsecond\n");
+        let state = wrap_state(10, 1, 0, 2);
+        let view = View {
+            doc: &doc,
+            state: &state,
+            highlight: None,
+        };
+        assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((0, 1)));
+    }
+
     #[test]
     fn a_syntax_colour_reaches_the_screen() {
         let doc = doc_of("colours.txt", b"alpha beta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 1,
             cursor_col: 0,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,
@@ -837,9 +1279,12 @@ mod tests {
         let doc = doc_of("colours-selection.txt", b"alpha beta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 0,
             cursor_col: 4,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
@@ -863,9 +1308,12 @@ mod tests {
         let doc = doc_of("colours-match.txt", b"alpha beta\n");
         let state = ViewState {
             top_line: 0,
+            top_row: 0,
+            word_wrap: false,
             cursor_line: 1,
             cursor_col: 0,
             show_line_numbers: false,
+            show_relative_numbers: false,
             width: 20,
             left_col: 0,
             anchor: None,

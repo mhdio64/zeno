@@ -5,5 +5,8 @@
 /.bench-data/
 /.bench-report.txt
 
+# Python cache of the end-to-end test harness
+__pycache__/
+
 # Freebuff Desktop project marker
 /.freebuff/
