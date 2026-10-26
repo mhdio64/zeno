@@ -249,8 +249,7 @@ Known gaps and inconsistencies (deliberately listed, not hidden):
 2. ~~**`docs/keymap.md` contradicts itself** in one paragraph~~ (Fixed: both `[settings]` and `[keys]` are noted as read).
 3. ~~**Mouse capture is enabled** (`EnableMouseCapture`)~~ (Fixed: capture removed in accordance with spec §4.2 "no mouse", restoring native terminal selection).
 4. ~~**No encoding in the status line**~~ (Fixed: UTF-8 encoding label added to status line per spec §4.2).
-5. **Themes are not implemented** while `keymap.md` calls `themes/` "reserved
-   for later"; the theme is fixed.
+5. ~~**Themes are not implemented**~~ (Fixed: user `.tmTheme` files in `themes/` and `theme` setting in `zeno.toml` supported per ADR 0008).
 6. ~~**The e2e find test is weaker than it looks**~~ (Fixed: tightened to assert gutter line 150 scrolled into view and prompt lifecycle).
 7. ~~**`docs/performance.md` numbers come from an earlier machine state**~~ (Fixed: regenerated with `cargo run --release --bin zeno-bench` and updated in docs/performance.md).
 

@@ -599,6 +599,9 @@ impl Editor {
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
         self.autosave = settings.autosave;
+        if settings.theme.as_deref() != self.highlight.theme() {
+            self.highlight = Highlighter::start_with_theme(&self.path, settings.theme.clone());
+        }
         self.keys = Keymap::from_config(&config.keys);
     }
 
@@ -4295,7 +4298,7 @@ mod tests {
     fn settings_reach_the_editor() {
         let (mut e, _p) = editor_with("settings.txt", b"ab\n");
         let settings = zeno_cli::config::parse(
-            "[settings]\nword_wrap = true\nline_numbers = false\ntab_width = 2\nauto_pair = false\n",
+            "[settings]\nword_wrap = true\nline_numbers = false\ntab_width = 2\nauto_pair = false\ntheme = \"Solarized (dark)\"\n",
         );
         let config = Config {
             settings,
@@ -4304,6 +4307,7 @@ mod tests {
         e.apply_settings(&config);
         assert!(e.view.word_wrap);
         assert!(!e.view.show_line_numbers);
+        assert_eq!(e.highlight.theme(), Some("Solarized (dark)"));
         assert_eq!(
             e.indent,
             IndentStyle::Spaces(2),

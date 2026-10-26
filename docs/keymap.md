@@ -267,6 +267,7 @@ relative_line_numbers = false
 tab_width = 4              # one indent level, 1–16
 auto_pair = true           # (", [", {", " and ' complete themselves
 autosave = false           # write the file after a moment of quiet
+theme = "base16-ocean.dark" # theme name or filename from themes/
 
 [keys]
 leader = "ctrl+space"      # what opens a sequence
@@ -290,10 +291,11 @@ move a command without having to unbind where it was. A chord or command that
 cannot be read is a line the editor ignores: a typo in a config file is not a
 reason for an editor not to start.
 
-The directory next to `zeno.toml` also holds `syntaxes/`, whose
-`.sublime-syntax` files are picked up automatically and win over the bundled
-definitions for the extensions they claim (spec §4.3). A `themes/` directory
-is reserved for later; the theme is fixed for now.
+The directory next to `zeno.toml` also holds `syntaxes/` and `themes/`. Extra
+`.sublime-syntax` and `.tmTheme` files in those directories are picked up
+automatically. Extra syntaxes win over bundled definitions for the extensions
+they claim (spec §4.3), and themes in `themes/` are selectable via `theme = "..."`
+under `[settings]` in `zeno.toml` or used as the user theme.
 
 Indentation is not asked for in `zeno.toml` beyond `tab_width`: the style is
 detected from the file itself, and `.editorconfig` in the file's directory

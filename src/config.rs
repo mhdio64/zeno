@@ -27,6 +27,8 @@ pub struct Settings {
     pub auto_pair: bool,
     /// Write the file when the editor has been idle for a moment.
     pub autosave: bool,
+    /// The syntax highlighting theme name. `None` uses the default dark theme.
+    pub theme: Option<String>,
 }
 
 impl Default for Settings {
@@ -38,6 +40,7 @@ impl Default for Settings {
             tab_width: 4,
             auto_pair: true,
             autosave: false,
+            theme: None,
         }
     }
 }
@@ -91,6 +94,11 @@ pub fn config_dir() -> Option<PathBuf> {
 /// Where the user's own `.sublime-syntax` files are read from.
 pub fn syntaxes_dir() -> Option<PathBuf> {
     Some(config_dir()?.join("syntaxes"))
+}
+
+/// Where the user's own `.tmTheme` files are read from.
+pub fn themes_dir() -> Option<PathBuf> {
+    Some(config_dir()?.join("themes"))
 }
 
 /// Reads the config, or the defaults when there is no file.
@@ -198,6 +206,12 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "relative_line_numbers" => set_bool(&mut settings.relative_line_numbers, value),
         "auto_pair" => set_bool(&mut settings.auto_pair, value),
         "autosave" => set_bool(&mut settings.autosave, value),
+        "theme" => {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                settings.theme = Some(trimmed.to_owned());
+            }
+        }
         "tab_width" => {
             // A width of zero would make an indent invisible and an unindent
             // an infinite loop; one is the narrowest useful.
@@ -292,12 +306,34 @@ tab_width = 8
             r#"
 # a leading comment
 [settings]  # the table
-theme = "zeno-dark"
+extra_option = "zeno-dark"
 tab_width = 3   # trailing
 "#,
         );
         assert_eq!(settings.tab_width, 3);
         assert_eq!(settings, Settings::default().with_tab_width(3));
+    }
+
+    #[test]
+    fn theme_setting_is_read() {
+        let settings = parse(
+            r#"
+[settings]
+theme = "Solarized (dark)"
+"#,
+        );
+        assert_eq!(settings.theme.as_deref(), Some("Solarized (dark)"));
+    }
+
+    #[test]
+    fn the_themes_dir_is_next_to_the_config() {
+        if let Some(dir) = themes_dir() {
+            assert!(
+                dir.ends_with(Path::new("zeno").join("themes")),
+                "{}",
+                dir.display()
+            );
+        }
     }
 
     #[test]

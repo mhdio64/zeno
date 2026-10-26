@@ -162,6 +162,8 @@ pub struct Highlighter {
     lines_version: u64,
     /// The name of the syntax in use.
     syntax: Option<String>,
+    /// The theme name requested for this highlighter.
+    theme: Option<String>,
 }
 
 impl Highlighter {
@@ -171,15 +173,22 @@ impl Highlighter {
     /// does not know yet whether the file is plain text, and a shebang on
     /// the first line may say otherwise.
     pub fn start(path: &Path) -> Self {
+        let theme = crate::config::load().settings.theme;
+        Self::start_with_theme(path, theme)
+    }
+
+    /// Starts the worker with an explicitly chosen theme name.
+    pub fn start_with_theme(path: &Path, theme: Option<String>) -> Self {
         let (requests, request_rx) = channel();
         let (colour_tx, colours) = channel();
         let epoch = Arc::new(AtomicU64::new(0));
         let worker = {
             let epoch = Arc::clone(&epoch);
             let path = path.to_path_buf();
+            let theme = theme.clone();
             std::thread::Builder::new()
                 .name("zeno-highlight".into())
-                .spawn(move || work(request_rx, colour_tx, epoch, path))
+                .spawn(move || work(request_rx, colour_tx, epoch, path, theme))
                 .expect("a thread to highlight with")
         };
         Self {
@@ -191,7 +200,13 @@ impl Highlighter {
             lines: Highlighted::new(),
             lines_version: 0,
             syntax: None,
+            theme,
         }
+    }
+
+    /// The theme name requested for this highlighter.
+    pub fn theme(&self) -> Option<&str> {
+        self.theme.as_deref()
     }
 
     /// Asks for the window that is on screen to be coloured.
@@ -584,6 +599,96 @@ fn load_syntaxes_from(dir: Option<&Path>) -> (SyntaxSet, usize) {
     (builder.build(), user_from)
 }
 
+/// The bundled themes, plus any `.tmTheme` files in the config directory's
+/// `themes/` (spec §6, ADR 0008).
+///
+/// Returns the full theme set and a list of theme keys loaded from the user's
+/// directory. A file that cannot be read or parsed is skipped: one broken theme
+/// must not cost the user every theme they had.
+fn load_themes() -> (ThemeSet, Vec<String>) {
+    load_themes_from(crate::config::themes_dir().as_deref())
+}
+
+/// The same, reading the user's themes from one directory.
+fn load_themes_from(dir: Option<&Path>) -> (ThemeSet, Vec<String>) {
+    let mut themes = ThemeSet::load_defaults();
+    let mut user_themes = Vec::new();
+    let Some(dir) = dir else {
+        return (themes, user_themes);
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return (themes, user_themes);
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("tmTheme"))
+        })
+        .collect();
+    // Sorted, so the same directory always produces the same set.
+    paths.sort();
+    for path in paths {
+        let Ok(theme) = ThemeSet::get_theme(&path) else {
+            continue;
+        };
+        let fallback_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or("");
+        let theme_name = theme.name.clone();
+        if !fallback_stem.is_empty() {
+            themes
+                .themes
+                .insert(fallback_stem.to_owned(), theme.clone());
+            user_themes.push(fallback_stem.to_owned());
+        }
+        if let Some(name) = theme_name
+            && name != fallback_stem
+        {
+            themes.themes.insert(name.clone(), theme);
+            user_themes.push(name);
+        }
+    }
+    (themes, user_themes)
+}
+
+/// Resolves the theme to use from the theme set.
+///
+/// When an explicit theme is requested (from configuration), it is looked up
+/// by exact key and then case-insensitively. If not found or not specified,
+/// any theme from the user's directory is chosen first; otherwise it falls
+/// back to the default dark theme (`base16-ocean.dark`).
+fn resolve_theme<'a>(
+    themes: &'a ThemeSet,
+    user_themes: &[String],
+    requested: Option<&str>,
+) -> &'a Theme {
+    if let Some(name) = requested {
+        if let Some(theme) = themes.themes.get(name) {
+            return theme;
+        }
+        for (k, theme) in &themes.themes {
+            if k.eq_ignore_ascii_case(name) {
+                return theme;
+            }
+        }
+    }
+    if let Some(first_user) = user_themes.first()
+        && let Some(theme) = themes.themes.get(first_user)
+    {
+        return theme;
+    }
+    if let Some(theme) = themes.themes.get(THEME) {
+        return theme;
+    }
+    themes
+        .themes
+        .values()
+        .next()
+        .expect("bundled themes to contain at least one theme")
+}
+
 /// A style from the theme, in the editor's terms.
 ///
 /// Only the foreground and the weight of the text are taken. The editor
@@ -626,23 +731,15 @@ fn work(
     sender: Sender<Colours>,
     epoch: Arc<AtomicU64>,
     path: PathBuf,
+    requested_theme: Option<String>,
 ) {
     // Loading the syntax definitions and the theme takes tens of
     // milliseconds, and the editor has fifty for its whole first frame. It
     // happens here, in the worker, so the editor paints plain text and the
     // colours arrive a moment later.
     let (syntaxes, user_from) = load_syntaxes();
-    let themes = ThemeSet::load_defaults();
-    let Some(theme) = themes
-        .themes
-        .get(THEME)
-        .or_else(|| themes.themes.values().next())
-        .cloned()
-    else {
-        // No theme at all: the editor stays plain, which is still a working
-        // editor.
-        return;
-    };
+    let (themes, user_themes) = load_themes();
+    let theme = resolve_theme(&themes, &user_themes, requested_theme.as_deref()).clone();
     let plain = syntect::highlighting::Highlighter::new(&theme).get_default();
     let mut worker = Worker {
         syntaxes,
@@ -728,6 +825,131 @@ mod tests {
             std::fs::write(dir.join(file), text).unwrap();
         }
         dir
+    }
+
+    /// A directory of the user's own themes, with the given files in it.
+    fn theme_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("zeno-theme-{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (file, text) in files {
+            std::fs::write(dir.join(file), text).unwrap();
+        }
+        dir
+    }
+
+    fn theme_plist(name: &str, keyword_color: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>name</key>
+    <string>{name}</string>
+    <key>settings</key>
+    <array>
+        <dict>
+            <key>settings</key>
+            <dict>
+                <key>background</key>
+                <string>#000000</string>
+                <key>foreground</key>
+                <string>#ffffff</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Keyword</string>
+            <key>scope</key>
+            <string>keyword</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>{keyword_color}</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
+"#
+        )
+    }
+
+    #[test]
+    fn a_theme_in_the_config_directory_is_picked_up() {
+        let dir = theme_dir(
+            "custom",
+            &[("zeno-amber.tmTheme", &theme_plist("Zeno Amber", "#ffaa00"))],
+        );
+        let (themes, user_themes) = load_themes_from(Some(&dir));
+        assert!(themes.themes.contains_key("zeno-amber"));
+        assert!(themes.themes.contains_key("Zeno Amber"));
+        assert!(user_themes.contains(&"zeno-amber".to_string()));
+
+        let chosen = resolve_theme(&themes, &user_themes, Some("zeno-amber"));
+        assert_eq!(chosen.name.as_deref(), Some("Zeno Amber"));
+
+        let auto_chosen = resolve_theme(&themes, &user_themes, None);
+        assert_eq!(auto_chosen.name.as_deref(), Some("Zeno Amber"));
+    }
+
+    #[test]
+    fn a_users_theme_beats_the_bundled_one_for_the_same_name() {
+        let dir = theme_dir(
+            "override",
+            &[(
+                "base16-ocean.dark.tmTheme",
+                &theme_plist("Base16 Ocean Dark", "#123456"),
+            )],
+        );
+        let (themes, user_themes) = load_themes_from(Some(&dir));
+        let chosen = resolve_theme(&themes, &user_themes, Some("base16-ocean.dark"));
+        let kw_color = chosen
+            .scopes
+            .iter()
+            .find(|item| item.scope == std::str::FromStr::from_str("keyword").unwrap());
+        assert!(kw_color.is_some());
+    }
+
+    #[test]
+    fn a_broken_theme_file_does_not_take_the_others_with_it() {
+        let dir = theme_dir(
+            "broken",
+            &[
+                ("a-broken.tmTheme", "this is not xml <plist>"),
+                ("b-good.tmTheme", &theme_plist("Good Theme", "#00ff00")),
+            ],
+        );
+        let (themes, user_themes) = load_themes_from(Some(&dir));
+        assert!(themes.themes.contains_key("b-good"));
+        assert!(user_themes.contains(&"b-good".to_string()));
+        assert!(themes.themes.contains_key("base16-ocean.dark"));
+    }
+
+    #[test]
+    fn a_missing_theme_directory_is_the_bundled_set() {
+        let (themes, user_themes) = load_themes_from(Some(Path::new("/no/such/zeno/themes")));
+        assert!(user_themes.is_empty());
+        assert!(themes.themes.contains_key("base16-ocean.dark"));
+        let chosen = resolve_theme(&themes, &user_themes, None);
+        assert_eq!(chosen.name.as_deref(), Some("Base16 Ocean Dark"));
+    }
+
+    #[test]
+    fn resolve_theme_falls_back_gracefully_on_unknown_theme() {
+        let (themes, user_themes) = load_themes_from(None);
+        let chosen = resolve_theme(&themes, &user_themes, Some("completely-unknown-theme-xyz"));
+        assert_eq!(chosen.name.as_deref(), Some("Base16 Ocean Dark"));
+    }
+
+    #[test]
+    fn highlighter_uses_explicit_theme() {
+        let (doc, path) = doc_of("main.rs", b"fn main() {}\n");
+        let mut highlighter = Highlighter::start_with_theme(&path, Some("Solarized (dark)".into()));
+        let colours = colours_of(&mut highlighter, &doc, 0, 1);
+        assert!(!colours.is_empty());
+        let spans = colours.get(&0).expect("line 0 colours");
+        assert!(!spans.is_empty());
     }
 
     /// A minimal syntax definition that claims one extension.
