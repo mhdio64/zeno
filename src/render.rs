@@ -503,15 +503,18 @@ fn gutter_style() -> Style {
 /// A subtle dark-slate background rather than reverse video: reverse video
 /// is glaringly bright and makes the cursor line look like selected text.
 /// A quiet background tint keeps syntax colours readable and lets a
-/// selection (which is reversed) stand out clearly against it.
+/// selection (which is bright white) stand out clearly against it.
 fn cursor_line_style() -> Style {
     Style::default().bg(Color::Rgb(36, 40, 50))
 }
 
+/// The style selected text is painted in.
+///
+/// A bright white background with black text, so that a selection is
+/// immediately distinct from both the default text and the subtle dark-slate
+/// cursor line.
 fn selection_style() -> Style {
-    Style::default()
-        .bg(Color::Reset)
-        .add_modifier(Modifier::REVERSED)
+    Style::default().fg(Color::Black).bg(Color::White)
 }
 
 /// The style a search match is painted in.
@@ -784,13 +787,14 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let reversed = |x: u16| buffer[(4 + x, 0)].modifier.contains(Modifier::REVERSED);
-        assert!(!reversed(0), "'a' is outside the selection");
+        let is_selected =
+            |x: u16| buffer[(4 + x, 0)].bg == Color::White && buffer[(4 + x, 0)].fg == Color::Black;
+        assert!(!is_selected(0), "'a' is outside the selection");
         assert!(
-            reversed(1) && reversed(2) && reversed(3),
+            is_selected(1) && is_selected(2) && is_selected(3),
             "'bcd' is selected"
         );
-        assert!(!reversed(4), "'e' is past the selection");
+        assert!(!is_selected(4), "'e' is past the selection");
     }
 
     #[test]
@@ -916,15 +920,12 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        assert!(
-            buffer[(6, 0)].modifier.contains(Modifier::REVERSED),
-            "the selection is painted reversed"
-        );
         assert_eq!(
             buffer[(6, 0)].bg,
-            Color::Reset,
-            "and not in the match style"
+            Color::White,
+            "the selection is painted with a white background"
         );
+        assert_eq!(buffer[(6, 0)].fg, Color::Black, "and black foreground");
         assert_eq!(
             buffer[(8, 0)].bg,
             Color::Yellow,
@@ -1036,12 +1037,19 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let reversed = |x: u16| buffer[(4 + x, 0)].modifier.contains(Modifier::REVERSED);
+        let is_selected =
+            |x: u16| buffer[(4 + x, 0)].bg == Color::White && buffer[(4 + x, 0)].fg == Color::Black;
         // The selection runs from column 12 to 18, and the window starts at
         // column 10, so it is painted five columns further right.
-        assert!(!reversed(0), "column 10 is outside the selection");
-        assert!(reversed(2) && reversed(7), "columns 12 to 18 are selected");
-        assert!(!reversed(8), "column 18 is the cursor and is not painted");
+        assert!(!is_selected(0), "column 10 is outside the selection");
+        assert!(
+            is_selected(2) && is_selected(7),
+            "columns 12 to 18 are selected"
+        );
+        assert!(
+            !is_selected(8),
+            "column 18 is the cursor and is not painted"
+        );
     }
 
     #[test]
@@ -1300,13 +1308,14 @@ mod tests {
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
-        assert!(
-            buffer[(2, 0)].modifier.contains(Modifier::REVERSED),
-            "the selection is painted reversed"
+        assert_eq!(
+            buffer[(2, 0)].bg,
+            Color::White,
+            "the selection is painted with a white background"
         );
         assert_eq!(
             buffer[(2, 0)].fg,
-            Color::Reset,
+            Color::Black,
             "and not in the colour of the syntax"
         );
     }
@@ -1398,8 +1407,9 @@ mod tests {
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(36, 40, 50));
-        assert!(!buffer[(0, 0)].modifier.contains(Modifier::REVERSED));
-        assert!(buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
+        assert_ne!(buffer[(0, 0)].bg, Color::White);
+        assert_eq!(buffer[(2, 0)].bg, Color::White);
+        assert_eq!(buffer[(2, 0)].fg, Color::Black);
     }
 
     #[test]
