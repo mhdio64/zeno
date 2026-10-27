@@ -505,7 +505,7 @@ fn gutter_style() -> Style {
 /// A quiet background tint keeps syntax colours readable and lets a
 /// selection (which is bright white) stand out clearly against it.
 fn cursor_line_style() -> Style {
-    Style::default().bg(Color::Rgb(36, 40, 50))
+    Style::default().bg(Color::Rgb(52, 55, 62))
 }
 
 /// The style selected text is painted in.
@@ -1382,7 +1382,7 @@ mod tests {
             highlight_pattern: None,
         };
         let buffer = draw(&doc, &state, None);
-        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(36, 40, 50));
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
         assert!(
             !buffer[(0, 0)].modifier.contains(Modifier::REVERSED),
             "the cursor line must not be reverse video"
@@ -1406,7 +1406,7 @@ mod tests {
             highlight_pattern: None,
         };
         let buffer = draw(&doc, &state, None);
-        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(36, 40, 50));
+        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
         assert_ne!(buffer[(0, 0)].bg, Color::White);
         assert_eq!(buffer[(2, 0)].bg, Color::White);
         assert_eq!(buffer[(2, 0)].fg, Color::Black);
