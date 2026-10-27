@@ -883,6 +883,16 @@ impl Editor {
         // Shift turns any movement into an extension of the selection.
         if shift {
             match key.code {
+                KeyCode::Left if ctrl => {
+                    self.begin_selection();
+                    self.set_cursor_col(0);
+                    return;
+                }
+                KeyCode::Right if ctrl => {
+                    self.begin_selection();
+                    self.set_cursor_col(usize::MAX);
+                    return;
+                }
                 KeyCode::Left => {
                     self.begin_selection();
                     self.move_cursor(-1, 0);
@@ -935,6 +945,14 @@ impl Editor {
             KeyCode::End if ctrl => {
                 self.clear_selection();
                 self.goto_end();
+            }
+            KeyCode::Left if ctrl => {
+                self.clear_selection();
+                self.set_cursor_col(0);
+            }
+            KeyCode::Right if ctrl => {
+                self.clear_selection();
+                self.set_cursor_col(usize::MAX);
             }
             KeyCode::Char(c) if !ctrl => self.insert_char(c),
             KeyCode::Enter => self.split_line(),
@@ -1046,6 +1064,8 @@ impl Editor {
                     prompt.delete();
                     edited = true;
                 }
+                KeyCode::Left if ctrl => prompt.home(),
+                KeyCode::Right if ctrl => prompt.end(),
                 KeyCode::Left => prompt.left(),
                 KeyCode::Right => prompt.right(),
                 KeyCode::Home => prompt.home(),
@@ -5306,8 +5326,11 @@ mod tests {
         assert!(e.overlay.is_none());
     }
 
+    static THEME_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn theme_picker_selects_and_applies_monokai() {
+        let _guard = THEME_TEST_MUTEX.lock().unwrap();
         let (mut e, _p) = editor_with("theme-apply.txt", b"fn main() {}\n");
         e.open_theme_picker();
         assert!(matches!(e.overlay, Some(Overlay::Theme(_))));
@@ -5324,6 +5347,7 @@ mod tests {
 
     #[test]
     fn theme_picker_selects_high_contrast() {
+        let _guard = THEME_TEST_MUTEX.lock().unwrap();
         let (mut e, _p) = editor_with("theme-hc.txt", b"let x = 42;\n");
         e.open_theme_picker();
 
@@ -5340,6 +5364,7 @@ mod tests {
 
     #[test]
     fn theme_picker_selects_solarized_light() {
+        let _guard = THEME_TEST_MUTEX.lock().unwrap();
         let (mut e, _p) = editor_with("theme-sol-light.txt", b"let text = 123;\n");
         e.open_theme_picker();
 
@@ -5355,6 +5380,7 @@ mod tests {
 
     #[test]
     fn theme_picker_persists_theme_to_config_file() {
+        let _guard = THEME_TEST_MUTEX.lock().unwrap();
         let temp_config =
             std::env::temp_dir().join(format!("zeno-theme-persist-{}.toml", std::process::id()));
         let _ = std::fs::remove_file(&temp_config);
@@ -5384,6 +5410,7 @@ mod tests {
 
     #[test]
     fn escape_closes_theme_picker_without_changing_theme() {
+        let _guard = THEME_TEST_MUTEX.lock().unwrap();
         let (mut e, _p) = editor_with("theme-esc.txt", b"hello\n");
         let initial_theme = e.highlight.theme().map(str::to_owned);
         e.open_theme_picker();
@@ -5823,5 +5850,56 @@ mod tests {
         let cfg = zeno_cli::config::parse_config("[settings]\nscrollbar = false\n");
         e.apply_settings(&cfg);
         assert!(!e.view.show_scrollbar);
+    }
+
+    #[test]
+    fn ctrl_left_and_ctrl_right_move_to_beginning_and_end_of_line() {
+        let (mut e, _p) = editor_with("ctrl-arrows.txt", b"abcdefghij\n");
+        e.view.cursor_col = 5;
+        e.handle_key(chord(KeyCode::Left));
+        assert_eq!(e.view.cursor_col, 0, "Ctrl+Left jumps to beginning of line");
+        e.handle_key(chord(KeyCode::Right));
+        assert_eq!(e.view.cursor_col, 10, "Ctrl+Right jumps to end of line");
+    }
+
+    #[test]
+    fn ctrl_shift_left_and_ctrl_shift_right_extend_selection_to_line_boundaries() {
+        let (mut e, _p) = editor_with("ctrl-shift-arrows.txt", b"abcdefghij\n");
+        e.view.cursor_col = 5;
+        let ctrl_shift_left = KeyEvent {
+            code: KeyCode::Left,
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        e.handle_key(ctrl_shift_left);
+        assert_eq!(e.view.cursor_col, 0);
+        assert_eq!(e.selection(), Some((Pos::new(0, 0), Pos::new(0, 5))));
+
+        e.clear_selection();
+        e.view.cursor_col = 5;
+        let ctrl_shift_right = KeyEvent {
+            code: KeyCode::Right,
+            modifiers: KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            kind: KeyEventKind::Press,
+            state: crossterm::event::KeyEventState::NONE,
+        };
+        e.handle_key(ctrl_shift_right);
+        assert_eq!(e.view.cursor_col, 10);
+        assert_eq!(e.selection(), Some((Pos::new(0, 5), Pos::new(0, 10))));
+    }
+
+    #[test]
+    fn prompt_ctrl_left_and_ctrl_right_move_to_beginning_and_end() {
+        let (mut e, _p) = editor_with("prompt-ctrl-arrows.txt", b"hello world\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}'))); // Ctrl+F
+        type_into_prompt(&mut e, "search text");
+        assert_eq!(e.prompt.as_ref().unwrap().cursor(), 11);
+
+        e.handle_key(chord(KeyCode::Left));
+        assert_eq!(e.prompt.as_ref().unwrap().cursor(), 0);
+
+        e.handle_key(chord(KeyCode::Right));
+        assert_eq!(e.prompt.as_ref().unwrap().cursor(), 11);
     }
 }
