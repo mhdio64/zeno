@@ -55,6 +55,7 @@ use syntect::highlighting::{FontStyle, HighlightState, RangedHighlightIterator, 
 use syntect::parsing::{ParseState, ScopeStack, SyntaxDefinition, SyntaxReference, SyntaxSet};
 
 use crate::doc::{Doc, Snapshot};
+use crate::theme::ThemeColors;
 
 /// The theme the colours come from.
 ///
@@ -80,6 +81,10 @@ const MONOKAI_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
                 <string>#272822</string>
                 <key>foreground</key>
                 <string>#f8f8f2</string>
+                <key>lineHighlight</key>
+                <string>#3e3d32</string>
+                <key>selection</key>
+                <string>#49483e</string>
             </dict>
         </dict>
         <dict>
@@ -178,6 +183,10 @@ const HIGH_CONTRAST_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
                 <key>background</key>
                 <string>#000000</string>
                 <key>foreground</key>
+                <string>#ffffff</string>
+                <key>lineHighlight</key>
+                <string>#232323</string>
+                <key>selection</key>
                 <string>#ffffff</string>
             </dict>
         </dict>
@@ -351,6 +360,8 @@ pub struct Highlighter {
     syntax: Option<String>,
     /// The theme name requested for this highlighter.
     theme: Option<String>,
+    /// The active theme's colors.
+    theme_colors: ThemeColors,
 }
 
 impl Highlighter {
@@ -378,6 +389,7 @@ impl Highlighter {
                 .spawn(move || work(request_rx, colour_tx, epoch, path, theme))
                 .expect("a thread to highlight with")
         };
+        let theme_colors = ThemeColors::for_theme(theme.as_deref());
         Self {
             requests,
             colours,
@@ -388,12 +400,18 @@ impl Highlighter {
             lines_version: 0,
             syntax: None,
             theme,
+            theme_colors,
         }
     }
 
     /// The theme name requested for this highlighter.
     pub fn theme(&self) -> Option<&str> {
         self.theme.as_deref()
+    }
+
+    /// The active theme's colors for editor chrome, gutter, and document body.
+    pub fn theme_colors(&self) -> ThemeColors {
+        self.theme_colors
     }
 
     /// Asks for the window that is on screen to be coloured.
@@ -1052,6 +1070,10 @@ mod tests {
                 <key>background</key>
                 <string>#000000</string>
                 <key>foreground</key>
+                <string>#ffffff</string>
+                <key>lineHighlight</key>
+                <string>#232323</string>
+                <key>selection</key>
                 <string>#ffffff</string>
             </dict>
         </dict>

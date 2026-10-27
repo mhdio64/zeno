@@ -886,11 +886,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
     let t1 = Instant::now();
     let mut buf = Buffer::empty(area);
     {
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         view.render(area, &mut buf);
     }
     let first_frame = t1.elapsed();
@@ -900,11 +896,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
     for _ in 0..frames {
         let t = Instant::now();
         {
-            let view = View {
-                doc: &doc,
-                state: &state,
-                highlight: None,
-            };
+            let view = View::new(&doc, &state);
             view.render(area, &mut buf);
         }
         samples.push(ms(t.elapsed()));
@@ -937,11 +929,7 @@ fn measure(path: &Path, frames: usize) -> Result<Measurement, String> {
             doc.edit(head, Pos::new(0, 1), "");
         }
         {
-            let view = View {
-                doc: &doc,
-                state: &state,
-                highlight: None,
-            };
+            let view = View::new(&doc, &state);
             view.render(area, &mut buf);
         }
         samples.push(ms(t.elapsed()));

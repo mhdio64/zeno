@@ -14,6 +14,7 @@ use crate::doc::Doc;
 use crate::doc::edit::Pos;
 use crate::highlight::Highlighted;
 use crate::search::Pattern;
+use crate::theme::ThemeColors;
 
 /// The visible state of the editor.
 #[derive(Debug, Clone)]
@@ -88,9 +89,21 @@ pub struct View<'a> {
     /// The highlighter works in the background, so this is empty until the
     /// colours arrive, and stays empty for a file with no syntax.
     pub highlight: Option<&'a Highlighted>,
+    /// The active theme's colors for editor canvas, cursor line, gutter, and chrome.
+    pub theme: ThemeColors,
 }
 
-impl View<'_> {
+impl<'a> View<'a> {
+    /// Creates a view with default theme colors and no syntax highlight.
+    pub fn new(doc: &'a Doc, state: &'a ViewState) -> Self {
+        Self {
+            doc,
+            state,
+            highlight: None,
+            theme: ThemeColors::default(),
+        }
+    }
+
     /// Width of the line-number gutter, in columns.
     ///
     /// Stable for the whole session: it is derived from the size of the file
@@ -222,7 +235,7 @@ impl View<'_> {
             let start = (*start).min(chars.len());
             let end = (*end).clamp(start, chars.len());
             for slot in &mut styles[start..end] {
-                *slot = match_style();
+                *slot = self.match_style();
             }
         }
         // The selection wins over the search match: it is what the user has
@@ -231,7 +244,7 @@ impl View<'_> {
             let from = from.min(chars.len());
             let to = to.clamp(from, chars.len());
             for slot in &mut styles[from..to] {
-                *slot = selection_style();
+                *slot = self.selection_style();
             }
         }
 
@@ -494,35 +507,31 @@ fn take_chars(text: &str, count: usize) -> &str {
     }
 }
 
-fn gutter_style() -> Style {
-    Style::default().fg(Color::DarkGray)
-}
+impl View<'_> {
+    /// The style of the line the cursor sits on.
+    fn cursor_line_style(&self) -> Style {
+        Style::default()
+            .bg(self.theme.line_highlight)
+            .fg(self.theme.fg)
+    }
 
-/// The style of the line the cursor sits on.
-///
-/// A subtle dark-slate background rather than reverse video: reverse video
-/// is glaringly bright and makes the cursor line look like selected text.
-/// A quiet background tint keeps syntax colours readable and lets a
-/// selection (which is bright white) stand out clearly against it.
-fn cursor_line_style() -> Style {
-    Style::default().bg(Color::Rgb(52, 55, 62))
-}
+    /// The style selected text is painted in.
+    fn selection_style(&self) -> Style {
+        Style::default()
+            .bg(self.theme.selection_bg)
+            .fg(self.theme.selection_fg)
+    }
 
-/// The style selected text is painted in.
-///
-/// A bright white background with black text, so that a selection is
-/// immediately distinct from both the default text and the subtle dark-slate
-/// cursor line.
-fn selection_style() -> Style {
-    Style::default().fg(Color::Black).bg(Color::White)
-}
-
-/// The style a search match is painted in.
-///
-/// A bright yellow match indicator that stands out against both normal
-/// text and the cursor line.
-fn match_style() -> Style {
-    Style::default().fg(Color::Black).bg(Color::Yellow)
+    /// The style a search match is painted in.
+    fn match_style(&self) -> Style {
+        if self.theme.is_dark {
+            Style::default().fg(Color::Black).bg(Color::Yellow)
+        } else {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Rgb(181, 137, 0))
+        }
+    }
 }
 
 /// How far past the right edge the search pattern is still read.
@@ -571,10 +580,13 @@ impl Widget for View<'_> {
                 };
                 let style = if is_cursor {
                     Style::default()
+                        .bg(self.theme.line_highlight)
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD)
                 } else {
-                    gutter_style()
+                    Style::default()
+                        .bg(self.theme.gutter_bg)
+                        .fg(self.theme.gutter_fg)
                 };
                 gutter_lines.push(Line::from(Span::styled(label, style)));
             }
@@ -592,9 +604,9 @@ impl Widget for View<'_> {
             let shown = (row.end - row.start).min(body_width as usize);
             let clipped: String = window.chars().take(shown).collect();
             let base = if is_cursor {
-                cursor_line_style()
+                self.cursor_line_style()
             } else {
-                Style::default()
+                Style::default().bg(self.theme.bg).fg(self.theme.fg)
             };
             let painted = clipped.chars().count();
             // The selection is named in the line's own columns; the window
@@ -619,7 +631,9 @@ impl Widget for View<'_> {
                 width: gutter,
                 height: area.height,
             };
-            Paragraph::new(Text::from(gutter_lines)).render(gutter_area, buf);
+            Paragraph::new(Text::from(gutter_lines))
+                .style(Style::default().bg(self.theme.gutter_bg))
+                .render(gutter_area, buf);
         }
 
         let body_area = Rect {
@@ -628,7 +642,9 @@ impl Widget for View<'_> {
             width: body_width,
             height: area.height,
         };
-        Paragraph::new(Text::from(body_lines)).render(body_area, buf);
+        Paragraph::new(Text::from(body_lines))
+            .style(Style::default().bg(self.theme.bg).fg(self.theme.fg))
+            .render(body_area, buf);
     }
 }
 
@@ -658,6 +674,7 @@ mod tests {
                     doc,
                     state,
                     highlight: None,
+                    theme: ThemeColors::default(),
                 };
                 f.render_widget(view, f.area());
             })
@@ -762,11 +779,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 4)));
         assert_eq!(
             view.selection_span(1),
@@ -778,11 +791,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View {
-                    doc: &doc,
-                    state: &state,
-                    highlight: None,
-                };
+                let view = View::new(&doc, &state);
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -813,11 +822,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(view.selection_span(1), Some((0, 2)));
         assert_eq!(view.selection_span(2), Some((0, 2)));
@@ -839,11 +844,7 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
         };
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
         assert_eq!(
             view.selection_span(1),
@@ -872,11 +873,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View {
-                    doc: &doc,
-                    state: &state,
-                    highlight: None,
-                };
+                let view = View::new(&doc, &state);
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -886,8 +883,8 @@ mod tests {
         assert_eq!(buffer[(9, 0)].bg, Color::Yellow);
         assert_eq!(
             buffer[(5, 0)].bg,
-            Color::Reset,
-            "the text before the match is not painted"
+            ThemeColors::default().bg,
+            "the text before the match keeps the theme background"
         );
     }
 
@@ -911,11 +908,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View {
-                    doc: &doc,
-                    state: &state,
-                    highlight: None,
-                };
+                let view = View::new(&doc, &state);
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -949,11 +942,7 @@ mod tests {
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
         };
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert!(view.match_ranges(0, 20).is_empty());
     }
 
@@ -973,11 +962,7 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
         };
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 20, 3);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 1);
@@ -1028,11 +1013,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|f| {
-                let view = View {
-                    doc: &doc,
-                    state: &state,
-                    highlight: None,
-                };
+                let view = View::new(&doc, &state);
                 f.render_widget(view, f.area());
             })
             .unwrap();
@@ -1057,11 +1038,7 @@ mod tests {
         let doc = doc_of("scroll-match.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let mut state = scrolled(12, 0);
         state.highlight_pattern = Some(Pattern::compile("klm").expect("a valid pattern"));
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         // "klm" sits at columns 10 to 13 and the window starts at 12, so
         // only its last character is on screen.
         assert_eq!(view.match_ranges(0, 20), vec![(0, 1)]);
@@ -1074,11 +1051,7 @@ mod tests {
         let doc = doc_of("scroll-far.txt", format!("{line}\n").as_bytes());
         let mut state = scrolled(100, 0);
         state.highlight_pattern = Some(Pattern::compile("needle").expect("a valid pattern"));
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert!(
             view.match_ranges(0, 20).is_empty(),
             "the match is further behind the edge than the scan looks"
@@ -1089,11 +1062,7 @@ mod tests {
     fn the_cursor_sits_at_its_own_column() {
         let doc = doc_of("cursor-scroll.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 15);
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 24, 2);
         let (x, y) = view.cursor_position(area).unwrap();
         assert_eq!(y, 0);
@@ -1105,11 +1074,7 @@ mod tests {
     fn a_cursor_outside_the_window_is_not_drawn() {
         let doc = doc_of("cursor-off.txt", b"abcdefghijklmnopqrstuvwxyz\n");
         let state = scrolled(10, 3);
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 24, 2);
         assert!(view.cursor_position(area).is_none());
     }
@@ -1133,6 +1098,15 @@ mod tests {
 
     /// The frame of a view, drawn into a test terminal.
     fn draw(doc: &Doc, state: &ViewState, highlight: Option<&Highlighted>) -> Buffer {
+        draw_with_theme(doc, state, highlight, ThemeColors::default())
+    }
+
+    fn draw_with_theme(
+        doc: &Doc,
+        state: &ViewState,
+        highlight: Option<&Highlighted>,
+        theme: ThemeColors,
+    ) -> Buffer {
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1141,6 +1115,7 @@ mod tests {
                     doc,
                     state,
                     highlight,
+                    theme,
                 };
                 f.render_widget(view, f.area());
             })
@@ -1216,11 +1191,7 @@ mod tests {
     fn the_cursor_sits_on_the_row_its_column_is_on() {
         let doc = doc_of("wrap-cursor.txt", b"alpha beta gamma\n");
         let state = wrap_state(10, 0, 12, 0);
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         // Column 12 is on the second row, two columns in: the row starts at
         // column 10, which holds the space after `beta`.
         assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((2, 1)));
@@ -1230,11 +1201,7 @@ mod tests {
     fn the_cursor_at_the_end_of_a_full_row_moves_to_the_next_one() {
         let doc = doc_of("wrap-cursor-edge.txt", b"abcdefghij\n");
         let state = wrap_state(10, 0, 10, 0);
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((0, 1)));
     }
 
@@ -1256,11 +1223,7 @@ mod tests {
     fn the_cursor_position_is_measured_from_the_top_row() {
         let doc = doc_of("wrap-cursor-row.txt", b"alpha beta gamma delta\nsecond\n");
         let state = wrap_state(10, 1, 0, 2);
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((0, 1)));
     }
 
@@ -1285,8 +1248,8 @@ mod tests {
         assert_eq!(buffer[(0, 0)].fg, Color::Red, "'alpha' is coloured");
         assert_eq!(
             buffer[(6, 0)].fg,
-            Color::Reset,
-            "the text after the coloured run is not"
+            ThemeColors::default().fg,
+            "the text after the coloured run has default theme foreground"
         );
     }
 
@@ -1360,7 +1323,7 @@ mod tests {
         let buffer = draw(&doc, &state, Some(&highlight));
         assert_eq!(
             buffer[(0, 0)].fg,
-            Color::Reset,
+            ThemeColors::default().fg,
             "the window does not show the coloured run"
         );
     }
@@ -1431,5 +1394,57 @@ mod tests {
         let buffer = draw(&doc, &state, None);
         assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
         assert!(buffer[(2, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
+    fn monokai_renders_authentic_background_and_cursor_line() {
+        let doc = doc_of("monokai-render.txt", b"let x = 42;\nlet y = 10;\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+        };
+        let buffer = draw_with_theme(&doc, &state, None, ThemeColors::MONOKAI);
+        // Cursor line gets Monokai's #3e3d32
+        assert_eq!(buffer[(0, 0)].bg, ThemeColors::MONOKAI.line_highlight);
+        assert_eq!(buffer[(0, 0)].fg, ThemeColors::MONOKAI.fg);
+
+        // Non-cursor line gets Monokai's #272822
+        assert_eq!(buffer[(0, 1)].bg, ThemeColors::MONOKAI.bg);
+        assert_eq!(buffer[(0, 1)].fg, ThemeColors::MONOKAI.fg);
+    }
+
+    #[test]
+    fn solarized_light_renders_warm_cream_background_and_contrasting_selection() {
+        let doc = doc_of("sol-light-render.txt", b"hello world\nsecond line\n");
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 5,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: Some(Pos::new(0, 0)),
+            highlight_pattern: None,
+        };
+        let buffer = draw_with_theme(&doc, &state, None, ThemeColors::SOLARIZED_LIGHT);
+        // Selection is dark navy #073642 on light theme
+        assert_eq!(buffer[(0, 0)].bg, ThemeColors::SOLARIZED_LIGHT.selection_bg);
+        assert_eq!(buffer[(0, 0)].fg, ThemeColors::SOLARIZED_LIGHT.selection_fg);
+
+        // Non-selected line 1 gets cream #fdf6e3 and dark text #657b83
+        assert_eq!(buffer[(0, 1)].bg, ThemeColors::SOLARIZED_LIGHT.bg);
+        assert_eq!(buffer[(0, 1)].fg, ThemeColors::SOLARIZED_LIGHT.fg);
     }
 }

@@ -47,6 +47,136 @@ pub const CURATED_THEMES: &[ThemeItem] = &[
     },
 ];
 
+/// The cohesive color scheme for editor chrome, gutter, cursor line, and document body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ThemeColors {
+    /// Document canvas background color
+    pub bg: Color,
+    /// Default plain text foreground color
+    pub fg: Color,
+    /// Background color of the active cursor line
+    pub line_highlight: Color,
+    /// Background color of selected text
+    pub selection_bg: Color,
+    /// Foreground color of selected text
+    pub selection_fg: Color,
+    /// Line number gutter text color
+    pub gutter_fg: Color,
+    /// Line number gutter background color
+    pub gutter_bg: Color,
+    /// Status bar background color
+    pub status_bg: Color,
+    /// Status bar foreground color
+    pub status_fg: Color,
+    /// Whether this is a dark theme (for contrast decisions)
+    pub is_dark: bool,
+}
+
+impl ThemeColors {
+    pub const OCEAN_DARK: Self = Self {
+        bg: Color::Rgb(43, 48, 59),
+        fg: Color::Rgb(192, 197, 206),
+        line_highlight: Color::Rgb(52, 55, 62),
+        selection_bg: Color::White,
+        selection_fg: Color::Black,
+        gutter_fg: Color::DarkGray,
+        gutter_bg: Color::Rgb(43, 48, 59),
+        status_bg: Color::Rgb(28, 28, 34),
+        status_fg: Color::Rgb(192, 197, 206),
+        is_dark: true,
+    };
+
+    pub const SOLARIZED_DARK: Self = Self {
+        bg: Color::Rgb(0, 43, 54),
+        fg: Color::Rgb(131, 148, 150),
+        line_highlight: Color::Rgb(7, 54, 66),
+        selection_bg: Color::White,
+        selection_fg: Color::Black,
+        gutter_fg: Color::Rgb(88, 110, 117),
+        gutter_bg: Color::Rgb(0, 43, 54),
+        status_bg: Color::Rgb(7, 54, 66),
+        status_fg: Color::Rgb(147, 161, 161),
+        is_dark: true,
+    };
+
+    pub const MONOKAI: Self = Self {
+        bg: Color::Rgb(39, 40, 34),
+        fg: Color::Rgb(248, 248, 242),
+        line_highlight: Color::Rgb(62, 61, 50),
+        selection_bg: Color::White,
+        selection_fg: Color::Black,
+        gutter_fg: Color::Rgb(117, 113, 94),
+        gutter_bg: Color::Rgb(39, 40, 34),
+        status_bg: Color::Rgb(30, 31, 28),
+        status_fg: Color::Rgb(248, 248, 242),
+        is_dark: true,
+    };
+
+    pub const SOLARIZED_LIGHT: Self = Self {
+        bg: Color::Rgb(253, 246, 227),
+        fg: Color::Rgb(101, 123, 131),
+        line_highlight: Color::Rgb(238, 232, 213),
+        selection_bg: Color::Rgb(7, 54, 66),
+        selection_fg: Color::Rgb(253, 246, 227),
+        gutter_fg: Color::Rgb(147, 161, 161),
+        gutter_bg: Color::Rgb(253, 246, 227),
+        status_bg: Color::Rgb(238, 232, 213),
+        status_fg: Color::Rgb(88, 110, 117),
+        is_dark: false,
+    };
+
+    pub const HIGH_CONTRAST: Self = Self {
+        bg: Color::Black,
+        fg: Color::White,
+        line_highlight: Color::Rgb(35, 35, 35),
+        selection_bg: Color::White,
+        selection_fg: Color::Black,
+        gutter_fg: Color::Yellow,
+        gutter_bg: Color::Black,
+        status_bg: Color::Black,
+        status_fg: Color::White,
+        is_dark: true,
+    };
+
+    /// Resolves curated theme colors by name or ID, falling back to Ocean Dark.
+    pub fn for_theme(theme_name: Option<&str>) -> Self {
+        match theme_name {
+            Some(name)
+                if name.eq_ignore_ascii_case("Solarized (dark)")
+                    || name.eq_ignore_ascii_case("solarized-dark")
+                    || name.eq_ignore_ascii_case("Solarized Dark") =>
+            {
+                Self::SOLARIZED_DARK
+            }
+            Some(name)
+                if name.eq_ignore_ascii_case("Monokai") || name.eq_ignore_ascii_case("monokai") =>
+            {
+                Self::MONOKAI
+            }
+            Some(name)
+                if name.eq_ignore_ascii_case("Solarized (light)")
+                    || name.eq_ignore_ascii_case("solarized-light")
+                    || name.eq_ignore_ascii_case("Solarized Light") =>
+            {
+                Self::SOLARIZED_LIGHT
+            }
+            Some(name)
+                if name.eq_ignore_ascii_case("High Contrast")
+                    || name.eq_ignore_ascii_case("high-contrast") =>
+            {
+                Self::HIGH_CONTRAST
+            }
+            _ => Self::OCEAN_DARK,
+        }
+    }
+}
+
+impl Default for ThemeColors {
+    fn default() -> Self {
+        Self::OCEAN_DARK
+    }
+}
+
 /// The theme picker overlay state: query, items, matches, and selection.
 #[derive(Debug, Clone)]
 pub struct ThemePicker {
@@ -301,6 +431,48 @@ mod tests {
             lines
                 .iter()
                 .any(|l| l.to_string().contains("High Contrast"))
+        );
+    }
+
+    #[test]
+    fn theme_colors_resolve_curated_palettes() {
+        let ocean = ThemeColors::for_theme(Some("base16-ocean.dark"));
+        assert_eq!(ocean, ThemeColors::OCEAN_DARK);
+        assert!(ocean.is_dark);
+
+        let solarized_dark = ThemeColors::for_theme(Some("Solarized (dark)"));
+        assert_eq!(solarized_dark, ThemeColors::SOLARIZED_DARK);
+        assert_eq!(solarized_dark.bg, Color::Rgb(0, 43, 54));
+        assert_eq!(solarized_dark.line_highlight, Color::Rgb(7, 54, 66));
+        assert!(solarized_dark.is_dark);
+
+        let monokai = ThemeColors::for_theme(Some("Monokai"));
+        assert_eq!(monokai, ThemeColors::MONOKAI);
+        assert_eq!(monokai.bg, Color::Rgb(39, 40, 34));
+        assert_eq!(monokai.fg, Color::Rgb(248, 248, 242));
+        assert_eq!(monokai.line_highlight, Color::Rgb(62, 61, 50));
+        assert!(monokai.is_dark);
+
+        let solarized_light = ThemeColors::for_theme(Some("Solarized (light)"));
+        assert_eq!(solarized_light, ThemeColors::SOLARIZED_LIGHT);
+        assert_eq!(solarized_light.bg, Color::Rgb(253, 246, 227));
+        assert_eq!(solarized_light.fg, Color::Rgb(101, 123, 131));
+        assert!(!solarized_light.is_dark);
+        // Selection must contrast against light background
+        assert_ne!(solarized_light.selection_bg, Color::White);
+        assert_eq!(solarized_light.selection_bg, Color::Rgb(7, 54, 66));
+
+        let hc = ThemeColors::for_theme(Some("High Contrast"));
+        assert_eq!(hc, ThemeColors::HIGH_CONTRAST);
+        assert_eq!(hc.bg, Color::Black);
+        assert_eq!(hc.fg, Color::White);
+        assert!(hc.is_dark);
+
+        // Fallback
+        assert_eq!(ThemeColors::for_theme(None), ThemeColors::OCEAN_DARK);
+        assert_eq!(
+            ThemeColors::for_theme(Some("unknown")),
+            ThemeColors::OCEAN_DARK
         );
     }
 }

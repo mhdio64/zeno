@@ -35,7 +35,7 @@ use zeno_cli::prompt::{Prompt, Purpose};
 use zeno_cli::render::{self, View, ViewState};
 use zeno_cli::search::{CaseMode, MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
-use zeno_cli::theme::{self, ThemePicker};
+use zeno_cli::theme::{self, ThemeColors, ThemePicker};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The line-comment prefix for a file, from its extension.
@@ -140,10 +140,17 @@ fn layout_letter(c: char) -> Option<char> {
 /// A search prompt also shows how many matches the pattern has, as soon as
 /// the background scan has counted them: that is the number the user is
 /// really looking for while typing.
-fn prompt_line(prompt: &Prompt, search: Option<&Search>, case: CaseMode) -> Paragraph<'static> {
-    let style = Style::default()
-        .bg(Color::Rgb(28, 28, 34))
-        .fg(Color::Yellow);
+fn prompt_line(
+    prompt: &Prompt,
+    search: Option<&Search>,
+    case: CaseMode,
+    colors: ThemeColors,
+) -> Paragraph<'static> {
+    let style = Style::default().bg(colors.status_bg).fg(if colors.is_dark {
+        Color::Yellow
+    } else {
+        Color::Rgb(181, 137, 0)
+    });
     let mut spans = vec![Span::styled(prompt.line(), style)];
     if matches!(prompt.purpose(), Purpose::Search | Purpose::Replace) {
         let mode_label = match case {
@@ -152,7 +159,7 @@ fn prompt_line(prompt: &Prompt, search: Option<&Search>, case: CaseMode) -> Para
             CaseMode::Insensitive => "  [case: ignore]",
         };
         if !mode_label.is_empty() {
-            let mode_style = Style::default().bg(Color::Rgb(28, 28, 34)).fg(Color::Cyan);
+            let mode_style = Style::default().bg(colors.status_bg).fg(Color::Cyan);
             spans.push(Span::styled(mode_label, mode_style));
         }
     }
@@ -320,11 +327,7 @@ fn bench_open_frame(path: &Path) -> ExitCode {
         let area = ratatui::layout::Rect::new(0, 0, 120, 40);
         let mut buf = ratatui::buffer::Buffer::empty(area);
         let state = ViewState::default();
-        let view = View {
-            doc: &doc,
-            state: &state,
-            highlight: None,
-        };
+        let view = View::new(&doc, &state);
         view.render(area, &mut buf);
         Ok(start.elapsed().as_secs_f64() * 1000.0)
     })();
@@ -3002,12 +3005,7 @@ impl Editor {
         self.viewport_height_hint = body.height;
         // The width the editor scrolls by is the width of the *text*, not the
         // width of the screen: the gutter takes some of it.
-        let gutter = View {
-            doc: &self.doc,
-            state: &self.view,
-            highlight: None,
-        }
-        .gutter_width();
+        let gutter = View::new(&self.doc, &self.view).gutter_width();
         self.view.width = body.width.saturating_sub(gutter);
         // The window may have changed shape since the last move, so the
         // cursor is brought back into view before anything is painted.
@@ -3018,6 +3016,7 @@ impl Editor {
         self.poll_highlight(body.height);
 
         terminal.draw(|f| {
+            let theme_colors = self.highlight.theme_colors();
             // A panel covers the document rather than sharing the screen with
             // it: the list is the thing being read, so it gets the room.
             let cursor = match &self.overlay {
@@ -3034,7 +3033,11 @@ impl Editor {
                         }
                         Overlay::Theme(picker) => theme::theme_lines(picker, body.height as usize),
                     };
-                    f.render_widget(Paragraph::new(Text::from(lines)), body);
+                    f.render_widget(
+                        Paragraph::new(Text::from(lines))
+                            .style(Style::default().bg(theme_colors.bg).fg(theme_colors.fg)),
+                        body,
+                    );
                     None
                 }
                 None => {
@@ -3042,6 +3045,7 @@ impl Editor {
                         doc: &self.doc,
                         state: &self.view,
                         highlight: Some(self.highlight.lines()),
+                        theme: theme_colors,
                     };
                     let cursor = view.cursor_position(body);
                     f.render_widget(view, body);
@@ -3053,7 +3057,7 @@ impl Editor {
                 // keeps its size and nothing on screen moves.
                 Some(prompt) => {
                     f.render_widget(
-                        prompt_line(prompt, self.search.as_ref(), self.search_case),
+                        prompt_line(prompt, self.search.as_ref(), self.search_case, theme_colors),
                         status,
                     );
                     // A choice prompt has no caret: the answer is one letter.
@@ -3170,7 +3174,11 @@ impl Editor {
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Rgb(28, 28, 34)))
+        Paragraph::new(Line::from(spans)).style(
+            Style::default()
+                .bg(self.highlight.theme_colors().status_bg)
+                .fg(self.highlight.theme_colors().status_fg),
+        )
     }
 }
 
@@ -4627,11 +4635,7 @@ mod tests {
             .as_ref()
             .expect("the typed pattern is what the viewport highlights");
         assert_eq!(pattern.source(), "beta");
-        let view = View {
-            doc: &e.doc,
-            state: &e.view,
-            highlight: None,
-        };
+        let view = View::new(&e.doc, &e.view);
         assert_eq!(
             view.match_ranges(1, 20),
             vec![(0, 4)],
@@ -5182,6 +5186,8 @@ mod tests {
 
         assert!(e.overlay.is_none());
         assert_eq!(e.highlight.theme(), Some("Monokai"));
+        assert_eq!(e.highlight.theme_colors(), ThemeColors::MONOKAI);
+        assert_eq!(e.highlight.theme_colors().bg, Color::Rgb(39, 40, 34));
         assert_eq!(e.message, "theme: Monokai");
     }
 
@@ -5195,7 +5201,25 @@ mod tests {
 
         assert!(e.overlay.is_none());
         assert_eq!(e.highlight.theme(), Some("High Contrast"));
+        assert_eq!(e.highlight.theme_colors(), ThemeColors::HIGH_CONTRAST);
+        assert_eq!(e.highlight.theme_colors().bg, Color::Black);
+        assert_eq!(e.highlight.theme_colors().fg, Color::White);
         assert_eq!(e.message, "theme: High Contrast");
+    }
+
+    #[test]
+    fn theme_picker_selects_solarized_light() {
+        let (mut e, _p) = editor_with("theme-sol-light.txt", b"let text = 123;\n");
+        e.open_theme_picker();
+
+        type_into_prompt(&mut e, "light");
+        e.handle_key(key(KeyCode::Enter));
+
+        assert!(e.overlay.is_none());
+        assert_eq!(e.highlight.theme(), Some("Solarized (light)"));
+        assert_eq!(e.highlight.theme_colors(), ThemeColors::SOLARIZED_LIGHT);
+        assert_eq!(e.highlight.theme_colors().bg, Color::Rgb(253, 246, 227));
+        assert_eq!(e.highlight.theme_colors().fg, Color::Rgb(101, 123, 131));
     }
 
     #[test]
