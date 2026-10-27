@@ -9,7 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers,
+};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -675,14 +678,19 @@ impl Editor {
     fn run(&mut self) -> Result<(), String> {
         enable_raw_mode().map_err(|e| e.to_string())?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen).map_err(|e| e.to_string())?;
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(stdout);
         let mut terminal = Terminal::new(backend).map_err(|e| e.to_string())?;
 
         let result = self.event_loop(&mut terminal);
 
         disable_raw_mode().ok();
-        execute!(terminal.backend_mut(), LeaveAlternateScreen).ok();
+        execute!(
+            terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste
+        )
+        .ok();
         terminal.show_cursor().ok();
 
         result
@@ -708,6 +716,10 @@ impl Editor {
                 {
                     self.last_key = std::time::Instant::now();
                     self.handle_key(key);
+                }
+                Event::Paste(text) => {
+                    self.last_key = std::time::Instant::now();
+                    self.handle_paste(&text);
                 }
                 Event::Resize(_, _) => {}
                 _ => {}
@@ -2079,7 +2091,52 @@ impl Editor {
             return;
         }
         let text = self.clipboard.clone();
-        self.insert_replacing_selection(&text);
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.insert_replacing_selection(&normalized);
+    }
+
+    /// Handles bracketed paste from the terminal.
+    ///
+    /// Preserves exact whitespace and indentation without cascading auto-indent,
+    /// and records the entire paste as a single undo step.
+    fn handle_paste(&mut self, text: &str) {
+        if let Some(mut overlay) = self.overlay.take() {
+            for c in text.chars() {
+                if c.is_control() {
+                    continue;
+                }
+                match &mut overlay {
+                    Overlay::Palette(palette) => palette.insert(c),
+                    Overlay::Finder(finder) => finder.insert(c),
+                    Overlay::Recent(picker) => picker.insert(c),
+                    Overlay::Theme(picker) => picker.insert(c),
+                    Overlay::Help { .. } => {}
+                }
+            }
+            self.overlay = Some(overlay);
+            return;
+        }
+
+        if let Some(prompt) = &mut self.prompt {
+            if prompt.is_text() {
+                let mut edited = false;
+                for c in text.chars() {
+                    if c != '\r' && c != '\n' && !c.is_control() {
+                        prompt.insert(c);
+                        edited = true;
+                    }
+                }
+                if edited {
+                    self.refresh_search();
+                }
+            }
+            return;
+        }
+
+        self.cancel_completion();
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.clipboard = normalized.clone();
+        self.insert_replacing_selection(&normalized);
     }
 
     // ----- selection -----------------------------------------------------
@@ -6265,5 +6322,46 @@ trim_trailing_whitespace = true
         e.save();
         let saved = std::fs::read_to_string(&path).unwrap();
         assert_eq!(saved, "line one   \nline two\t\n");
+    }
+
+    #[test]
+    fn bracketed_paste_preserves_indentation_without_cascading() {
+        let (mut e, _p) = editor_with("paste-test.py", b"");
+        let python_snippet = "parents, babies = (1, 1)\nwhile babies < 100:\n    print (f'This generation has {babies} babies')\n    parents, babies = (babies, parents + babies)\n";
+        e.handle_paste(python_snippet);
+
+        assert_eq!(line(&e, 0), "parents, babies = (1, 1)");
+        assert_eq!(line(&e, 1), "while babies < 100:");
+        assert_eq!(
+            line(&e, 2),
+            "    print (f'This generation has {babies} babies')"
+        );
+        assert_eq!(
+            line(&e, 3),
+            "    parents, babies = (babies, parents + babies)"
+        );
+    }
+
+    #[test]
+    fn bracketed_paste_undoes_in_a_single_step() {
+        let (mut e, _p) = editor_with("paste-undo.py", b"");
+        let snippet = "while True:\n    pass\n";
+        e.handle_paste(snippet);
+
+        assert_eq!(line(&e, 0), "while True:");
+        assert_eq!(line(&e, 1), "    pass");
+
+        e.undo();
+        assert_eq!(line(&e, 0), "");
+    }
+
+    #[test]
+    fn bracketed_paste_into_prompt_inserts_cleanly() {
+        let (mut e, _p) = editor_with("paste-prompt.txt", b"test content\n");
+        e.open_find();
+        assert!(e.prompt.is_some());
+        e.handle_paste("my_query\r\n");
+
+        assert_eq!(e.prompt.as_ref().unwrap().text(), "my_query");
     }
 }
