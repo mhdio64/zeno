@@ -2295,25 +2295,12 @@ impl Editor {
             return;
         }
         let text = self.doc.text_in_range(start, end);
-        let matches = pattern.find_in(&text);
-        if matches.is_empty() {
+        let (replaced, count) = pattern.replace_all(&text, replacement);
+        if count == 0 {
             self.message = format!("no match for {}", pattern.source());
             return;
         }
-        let chars: Vec<char> = text.chars().collect();
-        let mut replaced = String::with_capacity(text.len());
-        let mut at = 0usize;
-        for (from, to) in &matches {
-            if *from < at {
-                continue;
-            }
-            replaced.extend(&chars[at..*from]);
-            replaced.push_str(replacement);
-            at = *to;
-        }
-        replaced.extend(&chars[at..]);
 
-        let count = matches.len();
         self.doc.edit(start, end, &replaced);
         self.view.anchor = None;
         self.dirty = true;
@@ -4591,6 +4578,19 @@ mod tests {
         assert_eq!(e.doc.history().undo_depth(), 1, "one command, one undo");
         e.undo();
         assert_eq!(line(&e, 0), "hit x hit");
+    }
+
+    #[test]
+    fn ctrl_h_replaces_with_capture_groups() {
+        let (mut e, _p) = editor_with("replace-capture.txt", b"foo-bar\nalpha-beta\n");
+        e.handle_key(chord(KeyCode::Char('h')));
+        type_into_prompt(&mut e, r"(\w+)-(\w+)");
+        e.handle_key(key(KeyCode::Enter));
+        type_into_prompt(&mut e, "$2-$1");
+        e.handle_key(key(KeyCode::Enter));
+        assert_eq!(line(&e, 0), "bar-foo");
+        assert_eq!(line(&e, 1), "beta-alpha");
+        assert_eq!(e.message, "replaced 2 matches");
     }
 
     #[test]

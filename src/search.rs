@@ -139,6 +139,25 @@ impl Pattern {
     pub fn find_in(&self, text: &str) -> Vec<(usize, usize)> {
         self.matches_in(text).collect()
     }
+
+    /// Replaces every match of the pattern in `text` with `replacement`.
+    ///
+    /// Expands capture groups (`$1`, `${1}`, `$name`, `${name}`, and `$$`
+    /// for a literal dollar sign). Returns the rewritten text and the
+    /// number of replacements made.
+    pub fn replace_all(&self, text: &str, replacement: &str) -> (String, usize) {
+        if self.source.is_empty() {
+            return (text.to_owned(), 0);
+        }
+        let count = self.regex.find_iter(text).count();
+        if count == 0 {
+            return (text.to_owned(), 0);
+        }
+        (
+            self.regex.replace_all(text, replacement).into_owned(),
+            count,
+        )
+    }
 }
 
 /// What a scan is looking for.
@@ -490,6 +509,26 @@ mod tests {
     fn a_regex_matches_more_than_a_literal() {
         let pattern = pattern(r"\d+");
         assert_eq!(pattern.find_in("a12b345"), vec![(1, 3), (4, 7)]);
+    }
+
+    #[test]
+    fn pattern_replace_all_expands_capture_groups() {
+        let p = pattern(r"(\w+): (\d+)");
+        let (res, count) = p.replace_all("age: 25, count: 100", "$1 = $2");
+        assert_eq!(res, "age = 25, count = 100");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn pattern_replace_all_named_groups_and_literal_dollar() {
+        let p = pattern(r"(?P<curr>\$)(?P<val>\d+)");
+        let (res, count) = p.replace_all("price is $50", "$curr$val USD");
+        assert_eq!(res, "price is $50 USD");
+        assert_eq!(count, 1);
+
+        let (res, count) = p.replace_all("price is $50", "$$${val} USD");
+        assert_eq!(res, "price is $50 USD");
+        assert_eq!(count, 1);
     }
 
     #[test]
