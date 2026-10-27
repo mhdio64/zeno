@@ -203,6 +203,9 @@ impl Overlay {
 
     /// How many lines the document has, given the number of original lines.
     pub fn line_count(&self, original_lines: u64) -> u64 {
+        if original_lines == 0 {
+            return self.segments.iter().map(|e| e.lines.len() as u64).sum();
+        }
         let delta: i64 = self.segments.iter().map(|e| e.lines.len() as i64 - 1).sum();
         (original_lines as i64 + delta).max(0) as u64
     }

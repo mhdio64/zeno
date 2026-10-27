@@ -159,9 +159,34 @@ pub fn identity_of(path: &Path) -> std::io::Result<FileIdentity> {
 }
 
 impl Doc {
-    /// Opens a file and maps it into memory.
+    /// Creates an empty document with no backing file on disk.
+    pub fn empty() -> std::io::Result<Self> {
+        let path = std::env::temp_dir().join(format!("zeno-empty-{}.tmp", std::process::id()));
+        let file = File::create(&path)?;
+        let mmap = Arc::new(unsafe { Mmap::map(&file)? });
+        let _ = std::fs::remove_file(&path);
+        Ok(Self {
+            index: Arc::new(LineIndex::new(0)),
+            overlay: Overlay::new(),
+            history: History::new(),
+            mmap,
+            len: 0,
+            ending: LineEnding::Lf,
+            identity: FileIdentity {
+                len: 0,
+                modified: None,
+            },
+            version: 0,
+        })
+    }
+
+    /// Opens a file and maps it into memory, or creates an empty document if it does not exist.
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        let file = File::open(path)?;
+        let file = match File::open(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::empty(),
+            Err(e) => return Err(e),
+        };
         let meta = file.metadata()?;
         let len = meta.len();
         let identity = FileIdentity {
@@ -567,6 +592,25 @@ mod tests {
         let mut f = File::create(&path).unwrap();
         f.write_all(contents).unwrap();
         path
+    }
+
+    #[test]
+    fn open_empty_file_on_disk() {
+        let path = temp_file("empty_zero_bytes.txt", b"");
+        let doc = Doc::open(&path);
+        assert!(doc.is_ok(), "opening empty file failed: {:?}", doc.err());
+    }
+
+    #[test]
+    fn open_nonexistent_file_returns_empty_doc() {
+        let path = std::env::temp_dir()
+            .join("zeno-doc-tests")
+            .join("does_not_exist.txt");
+        let _ = std::fs::remove_file(&path);
+        let doc = Doc::open(&path).expect("opening non-existent file should yield empty doc");
+        assert_eq!(doc.line_count(), 0);
+        assert_eq!(doc.len(), 0);
+        assert!(doc.is_empty());
     }
 
     #[test]

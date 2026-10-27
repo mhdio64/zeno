@@ -3014,6 +3014,21 @@ mod tests {
     }
 
     #[test]
+    fn saving_a_new_file_creates_it_on_disk() {
+        let dir = std::env::temp_dir().join("zeno-editor-tests");
+        let path = dir.join("new_file_save.txt");
+        let _ = std::fs::remove_file(&path);
+        let doc = Doc::open(&path).expect("open new file");
+        let mut e = Editor::new(doc, path.clone());
+        e.insert_char('H');
+        e.insert_char('i');
+        e.save();
+        assert!(!e.dirty);
+        assert_eq!(std::fs::read(&path).unwrap(), b"Hi");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn saving_preserves_crlf_and_the_missing_final_newline() {
         let (mut e, path) = editor_with("save-crlf.txt", b"one\r\ntwo");
         e.view.cursor_line = 0;
