@@ -15,6 +15,7 @@ pub mod keys;
 pub mod motion;
 pub mod panel;
 pub mod prompt;
+pub mod recent;
 pub mod render;
 pub mod search;
 pub mod sequence;

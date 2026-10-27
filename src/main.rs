@@ -32,6 +32,7 @@ use zeno_cli::keys::Keymap;
 use zeno_cli::motion::{self, Motion};
 use zeno_cli::panel::{self, Palette};
 use zeno_cli::prompt::{Prompt, Purpose};
+use zeno_cli::recent::{self, RecentItem, RecentList, RecentPicker};
 use zeno_cli::render::{self, View, ViewState};
 use zeno_cli::search::{CaseMode, MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
@@ -559,6 +560,8 @@ struct Editor {
     search_case: CaseMode,
     /// The leader and the chords `zeno.toml` added, on top of the defaults.
     keys: Keymap,
+    /// Visited files and their viewport positions.
+    recent_files: RecentList,
 }
 
 /// A panel that covers the document while it is open.
@@ -570,6 +573,8 @@ enum Overlay {
     Palette(Palette),
     /// The file finder, with its query.
     Finder(FileFinder),
+    /// The recent files / buffer picker, with its query.
+    Recent(RecentPicker),
     /// The theme picker, with its query.
     Theme(ThemePicker),
 }
@@ -603,6 +608,7 @@ impl Editor {
             last_key: std::time::Instant::now(),
             search_case: CaseMode::Smart,
             keys: Keymap::default(),
+            recent_files: RecentList::new(),
         }
     }
 
@@ -780,6 +786,10 @@ impl Editor {
             // byte it stands for from a VT-style terminal over a pty.
             if let KeyCode::Char('/' | '_' | '\u{1f}') = key.code {
                 self.toggle_line_comment();
+                return;
+            }
+            if let KeyCode::Char('6' | '^' | '\u{1e}') = key.code {
+                self.switch_to_alternate_file();
                 return;
             }
             match chord_letter(key.code) {
@@ -1366,6 +1376,8 @@ impl Editor {
             Command::Help => self.open_help(),
             Command::Palette => self.open_palette(),
             Command::OpenFile => self.open_finder(),
+            Command::RecentFiles => self.open_recent_picker(),
+            Command::AlternateFile => self.switch_to_alternate_file(),
             Command::SelectTheme => self.open_theme_picker(),
         }
     }
@@ -1383,6 +1395,63 @@ impl Editor {
     }
 
     /// `Leader t` and Palette "Select theme": opens the interactive theme picker.
+    /// `Leader b` and Palette "Recent files": opens the recent files / buffer picker.
+    fn open_recent_picker(&mut self) {
+        let root = self.project_root();
+        let mut items = Vec::new();
+
+        for rec in self.recent_files.iter() {
+            if rec.path != self.path {
+                let display = rec
+                    .path
+                    .strip_prefix(&root)
+                    .unwrap_or(&rec.path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                items.push(RecentItem {
+                    display,
+                    path: rec.path.clone(),
+                    cursor_line: rec.cursor_line,
+                    cursor_col: rec.cursor_col,
+                    is_current: false,
+                });
+            }
+        }
+
+        if !self.pipe_out && !self.path.as_os_str().is_empty() {
+            let display = self
+                .path
+                .strip_prefix(&root)
+                .unwrap_or(&self.path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            items.push(RecentItem {
+                display,
+                path: self.path.clone(),
+                cursor_line: self.view.cursor_line,
+                cursor_col: self.view.cursor_col,
+                is_current: true,
+            });
+        }
+
+        let picker = RecentPicker::new(items);
+        self.overlay = Some(Overlay::Recent(picker));
+        self.message.clear();
+    }
+
+    /// `Ctrl+6` / `Ctrl+^` and Palette "Switch to alternate file": switches immediately to the last visited buffer.
+    fn switch_to_alternate_file(&mut self) {
+        if let Some(target) = self
+            .recent_files
+            .alternate(&self.path)
+            .map(|r| r.path.clone())
+        {
+            self.switch_to_file(&target);
+        } else {
+            self.message = "no alternate file".into();
+        }
+    }
+
     fn open_theme_picker(&mut self) {
         let current = self.highlight.theme();
         let picker = ThemePicker::new(current);
@@ -1400,7 +1469,8 @@ impl Editor {
     /// `Ctrl+O`, `Leader o` and Palette "Open file": scans the project and opens the file finder.
     fn open_finder(&mut self) {
         let root = self.project_root();
-        let finder = FileFinder::scan(&root);
+        let recents: Vec<PathBuf> = self.recent_files.iter().map(|r| r.path.clone()).collect();
+        let finder = FileFinder::scan_with_recents(&root, &recents);
         self.overlay = Some(Overlay::Finder(finder));
         self.message.clear();
     }
@@ -1468,6 +1538,23 @@ impl Editor {
                 KeyCode::PageUp => finder.page_up(height),
                 KeyCode::Backspace => finder.backspace(),
                 KeyCode::Char(c) if !ctrl => finder.insert(c),
+                _ => {}
+            },
+            Overlay::Recent(picker) => match key.code {
+                KeyCode::Enter => {
+                    let chosen = picker.selected_item().map(|it| it.path.clone());
+                    self.overlay = None;
+                    if let Some(target) = chosen {
+                        self.switch_to_file(&target);
+                    }
+                    return;
+                }
+                KeyCode::Down => picker.down(),
+                KeyCode::Up => picker.up(),
+                KeyCode::PageDown => picker.page_down(height),
+                KeyCode::PageUp => picker.page_up(height),
+                KeyCode::Backspace => picker.backspace(),
+                KeyCode::Char(c) if !ctrl => picker.insert(c),
                 _ => {}
             },
             Overlay::Theme(picker) => match key.code {
@@ -2918,16 +3005,41 @@ impl Editor {
 
     /// Switches the editor to open and edit `target`.
     fn switch_to_file(&mut self, target: &Path) {
+        if target == self.path {
+            return;
+        }
         if self.dirty {
             self.message = "unsaved changes — Ctrl+S saves, Leader Q discards".into();
             return;
         }
+        if !self.pipe_out && !self.path.as_os_str().is_empty() {
+            self.recent_files.record(
+                self.path.clone(),
+                self.view.cursor_line,
+                self.view.cursor_col,
+                self.view.top_line,
+                self.view.left_col,
+            );
+        }
+
         match Doc::open(target) {
             Ok(doc) => {
                 let _ = doc.spawn_indexer();
                 self.doc = doc;
                 self.path = target.to_path_buf();
                 self.view = ViewState::default();
+                if let Some(saved) = self.recent_files.get(target) {
+                    if self.doc.line_text(saved.cursor_line).is_some() {
+                        self.view.cursor_line = saved.cursor_line;
+                    } else {
+                        self.view.cursor_line = self.doc.line_count().saturating_sub(1);
+                    }
+                    self.view.top_line = saved.top_line.min(self.view.cursor_line);
+                    self.view.left_col = saved.left_col;
+                    self.view.cursor_col = saved.cursor_col;
+                    self.clamp_column();
+                    self.ensure_cursor_visible();
+                }
                 self.dirty = false;
                 self.highlight = Highlighter::start_with_theme(
                     &self.path,
@@ -3031,6 +3143,9 @@ impl Editor {
                         }
                         Overlay::Finder(finder) => {
                             finder::finder_lines(finder, body.height as usize)
+                        }
+                        Overlay::Recent(picker) => {
+                            recent::recent_lines(picker, body.height as usize)
                         }
                         Overlay::Theme(picker) => theme::theme_lines(picker, body.height as usize),
                     };
@@ -5121,6 +5236,7 @@ mod tests {
             zeno_cli::finder::FileEntry {
                 display: "file2.txt".into(),
                 path: p2.clone(),
+                is_recent: false,
             },
         ])));
 
@@ -5151,6 +5267,7 @@ mod tests {
             zeno_cli::finder::FileEntry {
                 display: "dirty2.txt".into(),
                 path: p2.clone(),
+                is_recent: false,
             },
         ])));
 
@@ -5263,6 +5380,199 @@ mod tests {
 
         assert!(e.overlay.is_none());
         assert_eq!(e.highlight.theme(), initial_theme.as_deref());
+    }
+
+    #[test]
+    fn leader_b_opens_recent_files_picker() {
+        let (mut e, _p) = editor_with("leader-b-open.txt", b"hello\n");
+        sequence(&mut e, "b");
+        assert!(matches!(e.overlay, Some(Overlay::Recent(_))));
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.overlay.is_none());
+    }
+
+    #[test]
+    fn recent_files_switches_and_restores_cursor_position() {
+        let dir = std::env::temp_dir().join("zeno-recent-switch-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("first.txt");
+        let p2 = dir.join("second.txt");
+        std::fs::write(&p1, b"line 0\nline 1\nline 2\nline 3\nline 4\n").unwrap();
+        std::fs::write(&p2, b"alpha\nbeta\ngamma\ndelta\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        e.view.cursor_line = 3;
+        e.view.cursor_col = 2;
+
+        e.switch_to_file(&p2);
+        assert_eq!(e.path, p2);
+        assert_eq!(e.view.cursor_line, 0);
+
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 3;
+
+        sequence(&mut e, "b");
+        let Some(Overlay::Recent(picker)) = &e.overlay else {
+            panic!("expected Recent overlay");
+        };
+        assert_eq!(picker.selection(), 0);
+        assert_eq!(picker.selected_item().unwrap().path, p1);
+
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p1);
+        assert_eq!(e.view.cursor_line, 3);
+        assert_eq!(e.view.cursor_col, 2);
+
+        sequence(&mut e, "b");
+        let Some(Overlay::Recent(picker)) = &e.overlay else {
+            panic!("expected Recent overlay");
+        };
+        assert_eq!(picker.selection(), 0);
+        assert_eq!(picker.selected_item().unwrap().path, p2);
+
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p2);
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.view.cursor_col, 3);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_6_toggles_between_alternate_files_directly() {
+        let dir = std::env::temp_dir().join("zeno-ctrl6-toggle-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("docA.txt");
+        let p2 = dir.join("docB.txt");
+        std::fs::write(&p1, b"aaa\nbbb\nccc\n").unwrap();
+        std::fs::write(&p2, b"xxx\nyyy\nzzz\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 2;
+
+        e.switch_to_file(&p2);
+        assert_eq!(e.path, p2);
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 1;
+
+        e.handle_key(chord(KeyCode::Char('6')));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p1);
+        assert_eq!(e.view.cursor_line, 1);
+        assert_eq!(e.view.cursor_col, 2);
+
+        e.handle_key(chord(KeyCode::Char('6')));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p2);
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.view.cursor_col, 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn ctrl_6_with_no_alternate_file_reports_message() {
+        let (mut e, _p) = editor_with("single-file.txt", b"alone\n");
+        e.handle_key(chord(KeyCode::Char('6')));
+        assert_eq!(e.message, "no alternate file");
+    }
+
+    #[test]
+    fn recent_files_switch_refuses_when_dirty() {
+        let dir = std::env::temp_dir().join("zeno-recent-dirty-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("dirty_a.txt");
+        let p2 = dir.join("dirty_b.txt");
+        std::fs::write(&p1, b"initial a\n").unwrap();
+        std::fs::write(&p2, b"initial b\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        e.switch_to_file(&p2);
+        assert_eq!(e.path, p2);
+
+        e.insert_char('!');
+        assert!(e.dirty);
+
+        e.handle_key(chord(KeyCode::Char('6')));
+        assert_eq!(e.path, p2, "must not switch when dirty");
+        assert!(e.dirty);
+        assert!(e.message.contains("unsaved changes"));
+
+        sequence(&mut e, "b");
+        assert!(matches!(e.overlay, Some(Overlay::Recent(_))));
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p2, "must not switch when dirty");
+        assert!(e.dirty);
+        assert!(e.message.contains("unsaved changes"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_finder_integrates_recents_at_top() {
+        let dir = std::env::temp_dir().join("zeno-finder-recents-main-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let f1 = dir.join("src").join("main.rs");
+        let f2 = dir.join("src").join("lib.rs");
+        let f3 = dir.join("Cargo.toml");
+        std::fs::write(&f1, b"fn main() {}\n").unwrap();
+        std::fs::write(&f2, b"pub fn lib() {}\n").unwrap();
+        std::fs::write(&f3, b"[package]\n").unwrap();
+
+        let doc = Doc::open(&f1).unwrap();
+        let mut e = Editor::new(doc, f1.clone());
+        e.switch_to_file(&f2);
+
+        e.open_finder();
+        let Some(Overlay::Finder(finder)) = &e.overlay else {
+            panic!("expected Finder overlay");
+        };
+
+        assert!(finder.entries().len() >= 3);
+        assert_eq!(finder.entries()[0].path, f1);
+        assert!(finder.entries()[0].is_recent);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn palette_runs_recent_files_and_alternate_file() {
+        let dir = std::env::temp_dir().join("zeno-palette-recent-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("pal1.txt");
+        let p2 = dir.join("pal2.txt");
+        std::fs::write(&p1, b"one\n").unwrap();
+        std::fs::write(&p2, b"two\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        e.switch_to_file(&p2);
+
+        e.open_palette();
+        type_into_prompt(&mut e, "recent");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(matches!(e.overlay, Some(Overlay::Recent(_))));
+        e.handle_key(key(KeyCode::Esc));
+
+        e.open_palette();
+        type_into_prompt(&mut e, "alternate");
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p1);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

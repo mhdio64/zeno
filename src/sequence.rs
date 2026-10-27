@@ -15,6 +15,8 @@ pub enum Command {
     Save,
     SaveAs,
     OpenFile,
+    RecentFiles,
+    AlternateFile,
     SelectTheme,
     Quit,
     ForceQuit,
@@ -54,6 +56,8 @@ impl Command {
             Command::Save => "save",
             Command::SaveAs => "save_as",
             Command::OpenFile => "open_file",
+            Command::RecentFiles => "recent_files",
+            Command::AlternateFile => "alternate_file",
             Command::SelectTheme => "select_theme",
             Command::Quit => "quit",
             Command::ForceQuit => "force_quit",
@@ -93,6 +97,10 @@ impl Command {
             "save" => Command::Save,
             "save_as" | "saveas" => Command::SaveAs,
             "open_file" | "open" | "file_finder" => Command::OpenFile,
+            "recent_files" | "recent" | "buffers" | "recent_files_picker" => Command::RecentFiles,
+            "alternate_file" | "switch_buffer" | "toggle_buffer" | "other_file" => {
+                Command::AlternateFile
+            }
             "select_theme" | "theme" | "theme_picker" | "change_theme" => Command::SelectTheme,
             "quit" => Command::Quit,
             "force_quit" | "quit_without_saving" => Command::ForceQuit,
@@ -286,6 +294,7 @@ impl Sequences {
             's' => Some(Command::Save),
             'S' => Some(Command::SaveAs),
             'o' => Some(Command::OpenFile),
+            'b' => Some(Command::RecentFiles),
             't' => Some(Command::SelectTheme),
             'q' => Some(Command::Quit),
             'Q' => Some(Command::ForceQuit),
@@ -513,6 +522,8 @@ mod tests {
             Command::Save,
             Command::SaveAs,
             Command::OpenFile,
+            Command::RecentFiles,
+            Command::AlternateFile,
             Command::SelectTheme,
             Command::Quit,
             Command::ForceQuit,
@@ -548,6 +559,10 @@ mod tests {
         assert_eq!(run("s"), Step::Action(Action::Command(Command::Save)));
         assert_eq!(run("S"), Step::Action(Action::Command(Command::SaveAs)));
         assert_eq!(run("o"), Step::Action(Action::Command(Command::OpenFile)));
+        assert_eq!(
+            run("b"),
+            Step::Action(Action::Command(Command::RecentFiles))
+        );
         assert_eq!(
             run("t"),
             Step::Action(Action::Command(Command::SelectTheme))

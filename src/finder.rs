@@ -38,6 +38,8 @@ pub struct FileEntry {
     pub display: String,
     /// Absolute or relative path on disk.
     pub path: PathBuf,
+    /// Whether this file is among the recently visited files.
+    pub is_recent: bool,
 }
 
 /// Whether a directory name should be skipped during scan.
@@ -129,18 +131,37 @@ impl FileFinder {
 
     /// Scans `root` and builds a finder with all discovered files.
     pub fn scan(root: &Path) -> Self {
+        Self::scan_with_recents(root, &[])
+    }
+
+    /// Scans `root` and prioritizes recent files at the top of the list.
+    pub fn scan_with_recents(root: &Path, recents: &[PathBuf]) -> Self {
         let files = scan_dir(root);
-        let entries = files
-            .into_iter()
-            .map(|rel| {
-                let display = rel.to_string_lossy().replace('\\', "/");
-                let full = root.join(&rel);
-                FileEntry {
-                    display,
-                    path: full,
-                }
-            })
-            .collect();
+        let mut recent_entries = Vec::new();
+        let mut other_entries = Vec::new();
+
+        for rel in files {
+            let display = rel.to_string_lossy().replace('\\', "/");
+            let full = root.join(&rel);
+            let recent_idx = recents
+                .iter()
+                .position(|r| r == &full || r == &rel || full.ends_with(r));
+            let is_recent = recent_idx.is_some();
+            let entry = FileEntry {
+                display,
+                path: full,
+                is_recent,
+            };
+            if let Some(idx) = recent_idx {
+                recent_entries.push((idx, entry));
+            } else {
+                other_entries.push(entry);
+            }
+        }
+
+        recent_entries.sort_by_key(|&(idx, _)| idx);
+        let mut entries: Vec<FileEntry> = recent_entries.into_iter().map(|(_, e)| e).collect();
+        entries.extend(other_entries);
         Self::new(entries)
     }
 
@@ -221,12 +242,13 @@ impl FileFinder {
             let lower = entry.display.to_lowercase();
             let file_name = lower.rsplit('/').next().unwrap_or(&lower);
 
+            let bonus = if entry.is_recent { 0 } else { 1 };
             if file_name.contains(&query) {
-                scored.push((0, idx));
+                scored.push((bonus, idx));
             } else if lower.contains(&query) {
-                scored.push((1, idx));
+                scored.push((2 + bonus, idx));
             } else if is_subsequence(&query, &lower) {
-                scored.push((2, idx));
+                scored.push((4 + bonus, idx));
             }
         }
 
@@ -281,6 +303,9 @@ pub fn finder_lines(finder: &FileFinder, height: usize) -> Vec<Line<'static>> {
             body()
         };
 
+        let mut spans = Vec::new();
+        spans.push(Span::styled(if is_selected { "> " } else { "  " }, style));
+
         if let Some((dir, file)) = entry.display.rsplit_once('/') {
             let dir_style = if is_selected {
                 style
@@ -292,22 +317,27 @@ pub fn finder_lines(finder: &FileFinder, height: usize) -> Vec<Line<'static>> {
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
-            lines.push(Line::from(vec![
-                Span::styled(if is_selected { "> " } else { "  " }, style),
-                Span::styled(format!("{dir}/"), dir_style),
-                Span::styled(file.to_string(), file_style),
-            ]));
+            spans.push(Span::styled(format!("{dir}/"), dir_style));
+            spans.push(Span::styled(file.to_string(), file_style));
         } else {
             let file_style = if is_selected {
                 style
             } else {
                 Style::default().add_modifier(Modifier::BOLD)
             };
-            lines.push(Line::from(vec![
-                Span::styled(if is_selected { "> " } else { "  " }, style),
-                Span::styled(entry.display.clone(), file_style),
-            ]));
+            spans.push(Span::styled(entry.display.clone(), file_style));
         }
+
+        if entry.is_recent {
+            let badge_style = if is_selected {
+                style
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            spans.push(Span::styled(" [recent]", badge_style));
+        }
+
+        lines.push(Line::from(spans));
     }
 
     lines
@@ -368,14 +398,17 @@ mod tests {
             FileEntry {
                 display: "src/main.rs".into(),
                 path: PathBuf::from("src/main.rs"),
+                is_recent: false,
             },
             FileEntry {
                 display: "src/bin/zeno-bench.rs".into(),
                 path: PathBuf::from("src/bin/zeno-bench.rs"),
+                is_recent: false,
             },
             FileEntry {
                 display: "Cargo.toml".into(),
                 path: PathBuf::from("Cargo.toml"),
+                is_recent: false,
             },
         ];
         let mut finder = FileFinder::new(entries);
@@ -413,14 +446,17 @@ mod tests {
             FileEntry {
                 display: "a.txt".into(),
                 path: PathBuf::from("a.txt"),
+                is_recent: false,
             },
             FileEntry {
                 display: "b.txt".into(),
                 path: PathBuf::from("b.txt"),
+                is_recent: false,
             },
             FileEntry {
                 display: "c.txt".into(),
                 path: PathBuf::from("c.txt"),
+                is_recent: false,
             },
         ];
         let mut finder = FileFinder::new(entries);
@@ -448,13 +484,18 @@ mod tests {
             FileEntry {
                 display: "src/main.rs".into(),
                 path: PathBuf::from("src/main.rs"),
+                is_recent: true,
             },
             FileEntry {
                 display: "Cargo.toml".into(),
                 path: PathBuf::from("Cargo.toml"),
+                is_recent: false,
             },
         ];
         let mut finder = FileFinder::new(entries);
+        let initial_lines = finder_lines(&finder, 10);
+        assert!(initial_lines[1].to_string().contains("[recent]"));
+
         for c in "main".chars() {
             finder.insert(c);
         }
@@ -462,5 +503,25 @@ mod tests {
         let lines = finder_lines(&finder, 10);
         assert!(lines[0].to_string().contains("open file: main (1/2)"));
         assert!(lines.iter().any(|l| l.to_string().contains("main.rs")));
+    }
+
+    #[test]
+    fn scan_with_recents_prioritizes_recent_files() {
+        let dir = std::env::temp_dir().join("zeno-finder-recents-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(dir.join("a.txt"), b"").unwrap();
+        std::fs::write(dir.join("b.txt"), b"").unwrap();
+        std::fs::write(dir.join("c.txt"), b"").unwrap();
+
+        let recents = vec![dir.join("b.txt")];
+        let finder = FileFinder::scan_with_recents(&dir, &recents);
+
+        assert_eq!(finder.entries().len(), 3);
+        assert_eq!(finder.entries()[0].display, "b.txt");
+        assert!(finder.entries()[0].is_recent);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

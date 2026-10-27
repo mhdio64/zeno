@@ -46,6 +46,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::OpenFile,
     },
     Entry {
+        keys: "leader b",
+        label: "Recent files",
+        command: Command::RecentFiles,
+    },
+    Entry {
+        keys: "ctrl+6",
+        label: "Switch to alternate file",
+        command: Command::AlternateFile,
+    },
+    Entry {
         keys: "leader t",
         label: "Select theme",
         command: Command::SelectTheme,
