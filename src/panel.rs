@@ -36,6 +36,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::ForceQuit,
     },
     Entry {
+        keys: "leader S",
+        label: "Save as",
+        command: Command::SaveAs,
+    },
+    Entry {
         keys: "ctrl+z / leader u",
         label: "Undo",
         command: Command::Undo,

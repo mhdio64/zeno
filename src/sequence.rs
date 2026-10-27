@@ -13,6 +13,7 @@ use crate::motion::{Motion, Object};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
     Save,
+    SaveAs,
     Quit,
     ForceQuit,
     Undo,
@@ -49,6 +50,7 @@ impl Command {
     pub fn name(self) -> &'static str {
         match self {
             Command::Save => "save",
+            Command::SaveAs => "save_as",
             Command::Quit => "quit",
             Command::ForceQuit => "force_quit",
             Command::Undo => "undo",
@@ -85,6 +87,7 @@ impl Command {
             .collect();
         Some(match normalised.as_str() {
             "save" => Command::Save,
+            "save_as" | "saveas" => Command::SaveAs,
             "quit" => Command::Quit,
             "force_quit" | "quit_without_saving" => Command::ForceQuit,
             "undo" => Command::Undo,
@@ -275,6 +278,7 @@ impl Sequences {
 
         let command = match key {
             's' => Some(Command::Save),
+            'S' => Some(Command::SaveAs),
             'q' => Some(Command::Quit),
             'Q' => Some(Command::ForceQuit),
             'u' => Some(Command::Undo),
@@ -499,6 +503,7 @@ mod tests {
     fn every_command_name_round_trips() {
         for command in [
             Command::Save,
+            Command::SaveAs,
             Command::Quit,
             Command::ForceQuit,
             Command::Undo,
@@ -531,6 +536,7 @@ mod tests {
     #[test]
     fn a_standalone_mnemonic_is_a_command() {
         assert_eq!(run("s"), Step::Action(Action::Command(Command::Save)));
+        assert_eq!(run("S"), Step::Action(Action::Command(Command::SaveAs)));
         assert_eq!(
             run(","),
             Step::Action(Action::Command(Command::ToggleGutter))

@@ -283,11 +283,7 @@ fn main() -> ExitCode {
         };
     }
 
-    let Some(path) = path else {
-        eprintln!("zeno: no file given");
-        print_help();
-        return ExitCode::FAILURE;
-    };
+    let path = path.unwrap_or_else(|| PathBuf::from("[No Name]"));
 
     match run(&path, background_index, force) {
         Ok(()) => ExitCode::SUCCESS,
@@ -1104,9 +1100,9 @@ impl Editor {
                         self.message = format!("unexpected choice: {c}");
                     }
                 },
-                // A search or a replacement is answered with text, never
+                // A search, replacement or save-as is answered with text, never
                 // with a letter.
-                Purpose::Search | Purpose::Replace | Purpose::ReplaceWith => {
+                Purpose::Search | Purpose::Replace | Purpose::ReplaceWith | Purpose::SaveAs => {
                     self.message = "unexpected choice".into();
                 }
             },
@@ -1147,6 +1143,14 @@ impl Editor {
                 }
                 Purpose::Search => {
                     self.step_search(&text);
+                }
+                Purpose::SaveAs => {
+                    let trimmed = text.trim();
+                    if trimmed.is_empty() {
+                        self.message = "no file name given".into();
+                        return;
+                    }
+                    self.save_as(Path::new(trimmed));
                 }
                 _ => {
                     self.message = format!("unexpected text: {text}");
@@ -1308,6 +1312,7 @@ impl Editor {
     fn command(&mut self, command: Command) {
         match command {
             Command::Save => self.save(),
+            Command::SaveAs => self.open_save_as(),
             Command::Quit => {
                 if self.dirty {
                     self.message = "unsaved changes — Ctrl+S saves, Leader Q discards".into();
@@ -2717,12 +2722,34 @@ impl Editor {
 
     // ----- saving --------------------------------------------------------
 
+    /// Whether the file is an unnamed temporary buffer (e.g. opened with no arguments).
+    fn has_no_name(&self) -> bool {
+        self.path.as_os_str().is_empty()
+            || self.path.file_name().is_none()
+            || self.path.file_name() == Some(std::ffi::OsStr::new("[No Name]"))
+    }
+
+    /// `Leader S` and Palette "Save as": prompts for a destination path.
+    fn open_save_as(&mut self) {
+        let initial = if self.has_no_name() {
+            ""
+        } else {
+            &self.path.to_string_lossy()
+        };
+        self.prompt = Some(Prompt::with_text(Purpose::SaveAs, initial));
+        self.message.clear();
+    }
+
     /// Saves, unless the file on disk is no longer the one that was mapped.
     ///
     /// Overwriting silently is how an editor eats someone else's work — and,
     /// because the mapping is read-only but not protected from truncation, it
     /// is also how it can read past the end of a file that shrank.
     fn save(&mut self) {
+        if self.has_no_name() {
+            self.open_save_as();
+            return;
+        }
         if let Ok(current) = identity_of(&self.path)
             && current != self.doc.identity()
         {
@@ -2731,6 +2758,29 @@ impl Editor {
             return;
         }
         self.write_now();
+    }
+
+    /// Saves the document under `path`, updating the editor's path and highlighting.
+    fn save_as(&mut self, path: &Path) {
+        if path.as_os_str().is_empty() {
+            self.message = "cannot save a file without a name".into();
+            return;
+        }
+        match self.write_to_path(path) {
+            Ok(()) => {
+                self.path = path.to_path_buf();
+                self.dirty = false;
+                if let Ok(identity) = identity_of(&self.path) {
+                    self.doc.set_identity(identity);
+                }
+                self.highlight = Highlighter::start_with_theme(
+                    &self.path,
+                    self.highlight.theme().map(str::to_owned),
+                );
+                self.message = format!("wrote {}", self.path.display());
+            }
+            Err(e) => self.message = format!("save failed: {e}"),
+        }
     }
 
     fn write_now(&mut self) {
@@ -2771,12 +2821,23 @@ impl Editor {
     }
 
     fn write_to_disk(&self) -> Result<(), String> {
+        self.write_to_path(&self.path)
+    }
+
+    fn write_to_path(&self, target_path: &Path) -> Result<(), String> {
         let ending = self.doc.line_ending();
         let trailing = self.doc.ends_with_newline();
         let count = self.doc.line_count();
 
-        let dir = self.path.parent().filter(|p| !p.as_os_str().is_empty());
-        let tmp_name = match self.path.file_name() {
+        if let Some(parent) = target_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            let _ = fs::create_dir_all(parent);
+        }
+
+        let dir = target_path.parent().filter(|p| !p.as_os_str().is_empty());
+        let tmp_name = match target_path.file_name() {
             Some(name) => dir
                 .unwrap_or_else(|| Path::new("."))
                 .join(format!(".{}.zeno.tmp", name.to_string_lossy())),
@@ -2799,9 +2860,9 @@ impl Editor {
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
 
-        fs::rename(&tmp_name, &self.path).map_err(|e| {
+        fs::rename(&tmp_name, target_path).map_err(|e| {
             let _ = fs::remove_file(&tmp_name);
-            format!("{}: {e}", self.path.display())
+            format!("{}: {e}", target_path.display())
         })?;
         Ok(())
     }
@@ -3219,6 +3280,64 @@ mod tests {
         let tmp = path.parent().unwrap().join(".save-tmp.txt.zeno.tmp");
         assert!(!tmp.exists(), "{} was left behind", tmp.display());
         assert_eq!(std::fs::read(&path).unwrap(), b"one\n");
+    }
+
+    #[test]
+    fn save_as_saves_buffer_to_new_path_and_updates_editor_path() {
+        let (mut e, path) = editor_with("save-orig.txt", b"content\n");
+        let new_path = path.parent().unwrap().join("save-target.txt");
+        let _ = std::fs::remove_file(&new_path);
+        e.insert_char('X');
+        e.save_as(&new_path);
+        assert!(!e.dirty);
+        assert_eq!(e.path, new_path);
+        assert_eq!(std::fs::read(&new_path).unwrap(), b"Xcontent\n");
+        let _ = std::fs::remove_file(&new_path);
+    }
+
+    #[test]
+    fn save_as_command_opens_prompt_and_saves() {
+        let (mut e, path) = editor_with("save-as-cmd.txt", b"hello\n");
+        let target_path = path.parent().unwrap().join("saved-as.txt");
+        let _ = std::fs::remove_file(&target_path);
+
+        sequence(&mut e, "S");
+        assert!(e.prompt.is_some());
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::SaveAs);
+
+        while !prompt_text(&e).as_deref().unwrap_or("").is_empty() {
+            e.handle_key(key(KeyCode::Backspace));
+        }
+        type_into_prompt(&mut e, &target_path.to_string_lossy());
+        e.handle_key(key(KeyCode::Enter));
+
+        assert!(!e.dirty);
+        assert_eq!(e.path, target_path);
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"hello\n");
+        let _ = std::fs::remove_file(&target_path);
+    }
+
+    #[test]
+    fn saving_unnamed_file_prompts_for_save_as() {
+        let dir = std::env::temp_dir().join("zeno-editor-tests");
+        let target_path = dir.join("unnamed_target.txt");
+        let _ = std::fs::remove_file(&target_path);
+
+        let (mut e, _) = editor_with("[No Name]", b"draft text\n");
+        e.handle_key(chord(KeyCode::Char('s')));
+        assert!(
+            e.prompt.is_some(),
+            "Ctrl+S on [No Name] opens Save as prompt"
+        );
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::SaveAs);
+
+        type_into_prompt(&mut e, &target_path.to_string_lossy());
+        e.handle_key(key(KeyCode::Enter));
+
+        assert!(!e.dirty);
+        assert_eq!(e.path, target_path);
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"draft text\n");
+        let _ = std::fs::remove_file(&target_path);
     }
 
     #[test]

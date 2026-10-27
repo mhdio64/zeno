@@ -25,6 +25,7 @@ pub enum Purpose {
     /// The text to put in the pattern's place.
     ReplaceWith,
     ChangedOnDisk,
+    SaveAs,
 }
 
 impl Purpose {
@@ -36,6 +37,7 @@ impl Purpose {
             Purpose::Replace => "Replace: ",
             Purpose::ReplaceWith => "With: ",
             Purpose::ChangedOnDisk => "Changed on disk",
+            Purpose::SaveAs => "Save as: ",
         }
     }
 }
