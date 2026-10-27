@@ -2969,6 +2969,35 @@ impl Editor {
         spans.push(Span::raw("  "));
         spans.push(Span::raw(format!("Ln {}", self.view.cursor_line + 1)));
         spans.push(Span::raw(format!(", Col {}", self.view.cursor_col + 1)));
+        if let Some((start, end)) = self.selection() {
+            let sel_text = if start.line == end.line {
+                let count = end.col.saturating_sub(start.col);
+                if count == 1 {
+                    " (1 selected)".to_string()
+                } else {
+                    format!(" ({count} selected)")
+                }
+            } else {
+                let lines = end.line - start.line + 1;
+                if lines <= 100 {
+                    let chars = self.doc.text_in_range(start, end).chars().count();
+                    format!(" ({lines} lines, {chars} selected)")
+                } else {
+                    format!(" ({lines} lines selected)")
+                }
+            };
+            spans.push(Span::styled(sel_text, Style::default().fg(Color::Yellow)));
+        }
+
+        let lines = self.doc.line_count();
+        let percent = if lines <= 1 {
+            100
+        } else {
+            (((self.view.cursor_line + 1) * 100) / lines).min(100)
+        };
+        spans.push(Span::raw("  "));
+        spans.push(Span::raw(format!("{percent}%")));
+
         // The language of the file, once the highlighter has worked out
         // what it is.
         if let Some(syntax) = self.highlight.syntax() {
@@ -2984,7 +3013,6 @@ impl Editor {
         // `line_count` is the *edited* count: it applies the overlay to the
         // index. Once the scan is finished it is exact, so it is what the
         // status bar should show in both cases.
-        let lines = self.doc.line_count();
         if self.doc.is_indexing() {
             spans.push(Span::styled(
                 format!("{lines} lines (indexing…)"),
@@ -3074,6 +3102,80 @@ mod tests {
             text.contains("F1: Menu  ^S: Save  ^Q: Exit  ^F: Find"),
             "status line must show key hints when idle: {text}"
         );
+    }
+
+    #[test]
+    fn status_line_shows_selection_stats_single_and_multi_line() {
+        let (mut e, _p) = editor_with("sel_stats.txt", b"hello world\nline two\nline three\n");
+        let area = Rect::new(0, 0, 100, 1);
+
+        // Single line selection: "hello" (5 characters)
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.move_to(Pos::new(0, 5));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(
+            text.contains("(5 selected)"),
+            "status line must show single line selection: {text}"
+        );
+
+        // Multi-line selection: across 3 lines
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.move_to(Pos::new(2, 4));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(
+            text.contains("(3 lines, 25 selected)"),
+            "status line must show multi-line selection: {text}"
+        );
+    }
+
+    #[test]
+    fn status_line_shows_file_scroll_percentage() {
+        let lines: Vec<u8> = (0..10)
+            .map(|i| format!("line {i}\n"))
+            .collect::<String>()
+            .into_bytes();
+        let (mut e, _p) = editor_with("pct.txt", &lines);
+        let area = Rect::new(0, 0, 100, 1);
+
+        // Line 0 of 10: 10%
+        e.move_to(Pos::new(0, 0));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(text.contains("10%"), "expected 10%: {text}");
+
+        // Line 4 of 10: 50%
+        e.move_to(Pos::new(4, 0));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(text.contains("50%"), "expected 50%: {text}");
+
+        // Line 9 of 10: 100%
+        e.move_to(Pos::new(9, 0));
+        let mut buf = ratatui::buffer::Buffer::empty(area);
+        Widget::render(e.status_line(), area, &mut buf);
+        let mut text = String::new();
+        for x in 0..area.width {
+            text.push_str(buf[(x, 0)].symbol());
+        }
+        assert!(text.contains("100%"), "expected 100%: {text}");
     }
 
     #[test]
