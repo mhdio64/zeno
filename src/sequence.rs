@@ -46,6 +46,8 @@ pub enum Command {
     MoveLineDown,
     /// Word auto-completion from the current buffer (`Ctrl+N`).
     CompleteWord,
+    /// Trims trailing whitespace from all lines.
+    TrimTrailingWhitespace,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -81,6 +83,7 @@ impl Command {
             Command::MoveLineUp => "move_line_up",
             Command::MoveLineDown => "move_line_down",
             Command::CompleteWord => "complete_word",
+            Command::TrimTrailingWhitespace => "trim_trailing_whitespace",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -128,6 +131,9 @@ impl Command {
             "move_line_up" | "move_up" => Command::MoveLineUp,
             "move_line_down" | "move_down" => Command::MoveLineDown,
             "complete_word" | "complete" | "autocomplete" => Command::CompleteWord,
+            "trim_trailing_whitespace" | "trim_whitespace" | "trim" => {
+                Command::TrimTrailingWhitespace
+            }
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -552,6 +558,7 @@ mod tests {
             Command::MoveLineUp,
             Command::MoveLineDown,
             Command::CompleteWord,
+            Command::TrimTrailingWhitespace,
             Command::Help,
             Command::Palette,
         ] {

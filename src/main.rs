@@ -565,6 +565,8 @@ struct Editor {
     recent_files: RecentList,
     /// Active word completion session state (`Ctrl+N`).
     completion: Option<Completion>,
+    /// Whether to automatically trim trailing spaces and tabs from lines upon save.
+    trim_trailing_whitespace: bool,
 }
 
 /// A panel that covers the document while it is open.
@@ -613,6 +615,7 @@ impl Editor {
             keys: Keymap::default(),
             recent_files: RecentList::new(),
             completion: None,
+            trim_trailing_whitespace: false,
         }
     }
 
@@ -626,6 +629,7 @@ impl Editor {
         self.view.show_line_numbers = settings.line_numbers;
         self.view.show_relative_numbers = settings.relative_line_numbers;
         self.view.show_scrollbar = settings.scrollbar;
+        self.trim_trailing_whitespace = settings.trim_trailing_whitespace;
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
         self.autosave = settings.autosave;
@@ -1167,6 +1171,9 @@ impl Editor {
                     }
                     'o' => {
                         // overwrite: save the editor's version to disk
+                        if self.trim_trailing_whitespace {
+                            self.trim_trailing_whitespace();
+                        }
                         self.write_now();
                     }
                     'c' => {
@@ -1439,6 +1446,17 @@ impl Editor {
                     self.complete_next();
                 } else {
                     self.start_completion();
+                }
+            }
+            Command::TrimTrailingWhitespace => {
+                let count = self.trim_trailing_whitespace();
+                if count > 0 {
+                    self.message = format!(
+                        "trimmed trailing whitespace on {count} {}",
+                        if count == 1 { "line" } else { "lines" }
+                    );
+                } else {
+                    self.message = "no trailing whitespace".into();
                 }
             }
         }
@@ -1845,6 +1863,53 @@ impl Editor {
     fn accept_completion(&mut self) {
         self.completion = None;
         self.message.clear();
+    }
+
+    /// Trims trailing whitespace (spaces and tabs) from all lines in the document.
+    ///
+    /// Clamps the cursor and anchor if they were positioned inside the removed whitespace.
+    /// Returns the number of lines modified.
+    fn trim_trailing_whitespace(&mut self) -> usize {
+        self.doc.index_fully();
+        let total_lines = self.doc.line_count();
+        let mut trimmed_count = 0;
+
+        for line in 0..total_lines {
+            let Some(text) = self.doc.line_text(line) else {
+                continue;
+            };
+            let chars: Vec<char> = text.chars().collect();
+            let full_len = chars.len();
+            if full_len == 0 {
+                continue;
+            }
+            let mut end = full_len;
+            while end > 0 && (chars[end - 1] == ' ' || chars[end - 1] == '\t') {
+                end -= 1;
+            }
+            if end < full_len {
+                self.doc
+                    .edit(Pos::new(line, end), Pos::new(line, full_len), "");
+                trimmed_count += 1;
+                if self.view.cursor_line == line && self.view.cursor_col > end {
+                    self.view.cursor_col = end;
+                }
+                if let Some(anchor) = self.view.anchor
+                    && anchor.line == line
+                    && anchor.col > end
+                {
+                    self.view.anchor = Some(Pos::new(line, end));
+                }
+            }
+        }
+
+        if trimmed_count > 0 {
+            self.dirty = true;
+            self.clamp_column();
+            self.ensure_cursor_visible();
+        }
+
+        trimmed_count
     }
 
     /// `Ctrl+/`: comments out the touched lines, or uncomments them.
@@ -3082,6 +3147,9 @@ impl Editor {
             self.message.clear();
             return;
         }
+        if self.trim_trailing_whitespace {
+            self.trim_trailing_whitespace();
+        }
         self.write_now();
     }
 
@@ -3090,6 +3158,9 @@ impl Editor {
         if path.as_os_str().is_empty() {
             self.message = "cannot save a file without a name".into();
             return;
+        }
+        if self.trim_trailing_whitespace {
+            self.trim_trailing_whitespace();
         }
         match self.write_to_path(path) {
             Ok(()) => {
@@ -6131,5 +6202,68 @@ mod tests {
         e2.handle_key(chord(KeyCode::Char('n')));
         assert_eq!(e2.message, "no completions for 'xyz_unique'");
         assert!(e2.completion.is_none());
+    }
+
+    #[test]
+    fn trim_trailing_whitespace_removes_spaces_and_tabs_and_clamps_cursor() {
+        let (mut e, _p) = editor_with(
+            "trim-test.txt",
+            b"hello   \nworld\t  \n  indent kept   \nclean\n   \n",
+        );
+        e.view.cursor_line = 0;
+        e.view.cursor_col = 7;
+        e.view.anchor = Some(Pos::new(1, 7));
+
+        let trimmed = e.trim_trailing_whitespace();
+        assert_eq!(trimmed, 4);
+        assert_eq!(line(&e, 0), "hello");
+        assert_eq!(line(&e, 1), "world");
+        assert_eq!(line(&e, 2), "  indent kept");
+        assert_eq!(line(&e, 3), "clean");
+        assert_eq!(line(&e, 4), "");
+        assert_eq!(e.view.cursor_col, 5);
+        assert_eq!(e.view.anchor, Some(Pos::new(1, 5)));
+        assert!(e.dirty);
+    }
+
+    #[test]
+    fn trim_trailing_whitespace_command_from_palette_reports_message() {
+        let (mut e, _p) = editor_with("trim-cmd.txt", b"foo  \nbar \n");
+        e.command(Command::TrimTrailingWhitespace);
+        assert_eq!(e.message, "trimmed trailing whitespace on 2 lines");
+        assert_eq!(line(&e, 0), "foo");
+        assert_eq!(line(&e, 1), "bar");
+
+        e.command(Command::TrimTrailingWhitespace);
+        assert_eq!(e.message, "no trailing whitespace");
+    }
+
+    #[test]
+    fn trim_trailing_whitespace_on_save_when_enabled_in_config() {
+        let (mut e, path) = editor_with("trim-save.txt", b"line one   \nline two\t\n");
+        let config = config::parse_config(
+            r#"
+[settings]
+trim_trailing_whitespace = true
+"#,
+        );
+        e.apply_settings(&config);
+        assert!(e.trim_trailing_whitespace);
+
+        e.save();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "line one\nline two\n");
+    }
+
+    #[test]
+    fn trim_trailing_whitespace_not_run_on_save_when_disabled_by_default() {
+        let (mut e, path) = editor_with("trim-nosave.txt", b"line one   \nline two\t\n");
+        let config = config::parse_config("");
+        e.apply_settings(&config);
+        assert!(!e.trim_trailing_whitespace);
+
+        e.save();
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(saved, "line one   \nline two\t\n");
     }
 }

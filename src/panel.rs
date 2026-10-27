@@ -126,6 +126,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::CompleteWord,
     },
     Entry {
+        keys: "",
+        label: "Trim trailing whitespace",
+        command: Command::TrimTrailingWhitespace,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

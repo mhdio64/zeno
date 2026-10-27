@@ -31,6 +31,8 @@ pub struct Settings {
     pub theme: Option<String>,
     /// Draw the visual scrollbar on the right edge.
     pub scrollbar: bool,
+    /// Automatically trim trailing spaces and tabs from lines upon save.
+    pub trim_trailing_whitespace: bool,
 }
 
 impl Default for Settings {
@@ -44,6 +46,7 @@ impl Default for Settings {
             autosave: false,
             theme: None,
             scrollbar: true,
+            trim_trailing_whitespace: false,
         }
     }
 }
@@ -214,6 +217,7 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "auto_pair" => set_bool(&mut settings.auto_pair, value),
         "autosave" => set_bool(&mut settings.autosave, value),
         "scrollbar" => set_bool(&mut settings.scrollbar, value),
+        "trim_trailing_whitespace" => set_bool(&mut settings.trim_trailing_whitespace, value),
         "theme" => {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -408,6 +412,17 @@ theme = "Solarized (dark)"
 "#,
         );
         assert_eq!(settings.theme.as_deref(), Some("Solarized (dark)"));
+    }
+
+    #[test]
+    fn trim_trailing_whitespace_setting_is_read() {
+        let settings = parse(
+            r#"
+[settings]
+trim_trailing_whitespace = true
+"#,
+        );
+        assert!(settings.trim_trailing_whitespace);
     }
 
     #[test]
