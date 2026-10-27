@@ -18,6 +18,7 @@ pub mod prompt;
 pub mod render;
 pub mod search;
 pub mod sequence;
+pub mod theme;
 
 pub use doc::{Doc, LineIndex, Overlay};
 pub use render::{View, ViewState};

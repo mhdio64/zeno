@@ -46,6 +46,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::OpenFile,
     },
     Entry {
+        keys: "leader t",
+        label: "Select theme",
+        command: Command::SelectTheme,
+    },
+    Entry {
         keys: "ctrl+z / leader u",
         label: "Undo",
         command: Command::Undo,

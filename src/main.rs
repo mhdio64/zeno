@@ -35,6 +35,7 @@ use zeno_cli::prompt::{Prompt, Purpose};
 use zeno_cli::render::{self, View, ViewState};
 use zeno_cli::search::{CaseMode, MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
+use zeno_cli::theme::{self, ThemePicker};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// The line-comment prefix for a file, from its extension.
@@ -566,6 +567,8 @@ enum Overlay {
     Palette(Palette),
     /// The file finder, with its query.
     Finder(FileFinder),
+    /// The theme picker, with its query.
+    Theme(ThemePicker),
 }
 
 impl Editor {
@@ -1360,6 +1363,7 @@ impl Editor {
             Command::Help => self.open_help(),
             Command::Palette => self.open_palette(),
             Command::OpenFile => self.open_finder(),
+            Command::SelectTheme => self.open_theme_picker(),
         }
     }
 
@@ -1373,6 +1377,20 @@ impl Editor {
     fn open_palette(&mut self) {
         self.overlay = Some(Overlay::Palette(Palette::new()));
         self.message.clear();
+    }
+
+    /// `Leader t` and Palette "Select theme": opens the interactive theme picker.
+    fn open_theme_picker(&mut self) {
+        let current = self.highlight.theme();
+        let picker = ThemePicker::new(current);
+        self.overlay = Some(Overlay::Theme(picker));
+        self.message.clear();
+    }
+
+    /// Applies the chosen theme to the highlighter live.
+    fn apply_theme(&mut self, theme_id: &str) {
+        self.highlight = Highlighter::start_with_theme(&self.path, Some(theme_id.to_string()));
+        self.message = format!("theme: {theme_id}");
     }
 
     /// `Ctrl+O`, `Leader o` and Palette "Open file": scans the project and opens the file finder.
@@ -1446,6 +1464,21 @@ impl Editor {
                 KeyCode::PageUp => finder.page_up(height),
                 KeyCode::Backspace => finder.backspace(),
                 KeyCode::Char(c) if !ctrl => finder.insert(c),
+                _ => {}
+            },
+            Overlay::Theme(picker) => match key.code {
+                KeyCode::Enter => {
+                    let chosen = picker.selected_theme().map(|t| t.id);
+                    self.overlay = None;
+                    if let Some(theme_id) = chosen {
+                        self.apply_theme(theme_id);
+                    }
+                    return;
+                }
+                KeyCode::Down => picker.down(),
+                KeyCode::Up => picker.up(),
+                KeyCode::Backspace => picker.backspace(),
+                KeyCode::Char(c) if !ctrl => picker.insert(c),
                 _ => {}
             },
         }
@@ -2999,6 +3032,7 @@ impl Editor {
                         Overlay::Finder(finder) => {
                             finder::finder_lines(finder, body.height as usize)
                         }
+                        Overlay::Theme(picker) => theme::theme_lines(picker, body.height as usize),
                     };
                     f.render_widget(Paragraph::new(Text::from(lines)), body);
                     None
@@ -5126,6 +5160,55 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn leader_t_opens_theme_picker() {
+        let (mut e, _p) = editor_with("theme-picker.txt", b"hello\n");
+        sequence(&mut e, "t");
+        assert!(matches!(e.overlay, Some(Overlay::Theme(_))));
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.overlay.is_none());
+    }
+
+    #[test]
+    fn theme_picker_selects_and_applies_monokai() {
+        let (mut e, _p) = editor_with("theme-apply.txt", b"fn main() {}\n");
+        e.open_theme_picker();
+        assert!(matches!(e.overlay, Some(Overlay::Theme(_))));
+
+        type_into_prompt(&mut e, "mono");
+        e.handle_key(key(KeyCode::Enter));
+
+        assert!(e.overlay.is_none());
+        assert_eq!(e.highlight.theme(), Some("Monokai"));
+        assert_eq!(e.message, "theme: Monokai");
+    }
+
+    #[test]
+    fn theme_picker_selects_high_contrast() {
+        let (mut e, _p) = editor_with("theme-hc.txt", b"let x = 42;\n");
+        e.open_theme_picker();
+
+        type_into_prompt(&mut e, "contrast");
+        e.handle_key(key(KeyCode::Enter));
+
+        assert!(e.overlay.is_none());
+        assert_eq!(e.highlight.theme(), Some("High Contrast"));
+        assert_eq!(e.message, "theme: High Contrast");
+    }
+
+    #[test]
+    fn escape_closes_theme_picker_without_changing_theme() {
+        let (mut e, _p) = editor_with("theme-esc.txt", b"hello\n");
+        let initial_theme = e.highlight.theme().map(str::to_owned);
+        e.open_theme_picker();
+
+        e.handle_key(key(KeyCode::Down));
+        e.handle_key(key(KeyCode::Esc));
+
+        assert!(e.overlay.is_none());
+        assert_eq!(e.highlight.theme(), initial_theme.as_deref());
     }
 
     #[test]
