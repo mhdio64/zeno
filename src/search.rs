@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::JoinHandle;
 
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 use crate::doc::Snapshot;
 use crate::doc::edit::Pos;
@@ -87,20 +87,79 @@ impl Iterator for Matches<'_> {
     }
 }
 
+/// How a search pattern treats uppercase and lowercase characters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CaseMode {
+    /// Case-insensitive if the pattern contains only lowercase letters;
+    /// case-sensitive as soon as an uppercase letter is typed.
+    #[default]
+    Smart,
+    /// Strictly case-sensitive matching.
+    Sensitive,
+    /// Case-insensitive matching regardless of character case.
+    Insensitive,
+}
+
+impl CaseMode {
+    /// Whether `source` should be compiled with regex case insensitivity.
+    pub fn is_case_insensitive(self, source: &str) -> bool {
+        match self {
+            CaseMode::Insensitive => true,
+            CaseMode::Sensitive => false,
+            CaseMode::Smart => !has_uppercase(source),
+        }
+    }
+
+    /// Cycles through the modes: Smart -> Sensitive -> Insensitive -> Smart.
+    pub fn cycle(self) -> Self {
+        match self {
+            CaseMode::Smart => CaseMode::Sensitive,
+            CaseMode::Sensitive => CaseMode::Insensitive,
+            CaseMode::Insensitive => CaseMode::Smart,
+        }
+    }
+}
+
+/// Checks whether `source` contains any uppercase letter outside of escape sequences.
+fn has_uppercase(source: &str) -> bool {
+    let mut chars = source.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            // An escape sequence (e.g. \S, \D, \W, \B) does not count as an uppercase literal.
+            chars.next();
+            continue;
+        }
+        if c.is_uppercase() {
+            return true;
+        }
+    }
+    false
+}
+
 /// A compiled search pattern.
 #[derive(Debug, Clone)]
 pub struct Pattern {
     regex: Regex,
     source: String,
+    mode: CaseMode,
 }
 
 impl Pattern {
     /// Compiles a pattern, or explains why it cannot be compiled.
     pub fn compile(source: &str) -> Result<Self, String> {
-        match Regex::new(source) {
+        Self::compile_with_mode(source, CaseMode::Smart)
+    }
+
+    /// Compiles a pattern with an explicit [`CaseMode`].
+    pub fn compile_with_mode(source: &str, mode: CaseMode) -> Result<Self, String> {
+        let case_insensitive = mode.is_case_insensitive(source);
+        let mut builder = RegexBuilder::new(source);
+        builder.case_insensitive(case_insensitive);
+        match builder.build() {
             Ok(regex) => Ok(Self {
                 regex,
                 source: source.to_owned(),
+                mode,
             }),
             Err(error) => {
                 // The regex error spans several lines; the first one says
@@ -115,6 +174,11 @@ impl Pattern {
     /// The text the pattern was compiled from.
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// The casing mode the pattern was compiled with.
+    pub fn mode(&self) -> CaseMode {
+        self.mode
     }
 
     /// The matches in one line of text, as character-column ranges.
@@ -509,6 +573,50 @@ mod tests {
     fn a_regex_matches_more_than_a_literal() {
         let pattern = pattern(r"\d+");
         assert_eq!(pattern.find_in("a12b345"), vec![(1, 3), (4, 7)]);
+    }
+
+    #[test]
+    fn pattern_smart_case_matches_case_insensitively_when_lowercase() {
+        let pattern = Pattern::compile("hello").unwrap();
+        let matches = pattern.find_in("hello Hello HELLO");
+        assert_eq!(
+            matches.len(),
+            3,
+            "smart case matches all casings when lowercase: {matches:?}"
+        );
+    }
+
+    #[test]
+    fn pattern_smart_case_matches_case_sensitively_when_uppercase() {
+        let pattern = Pattern::compile("Hello").unwrap();
+        let matches = pattern.find_in("hello Hello HELLO");
+        assert_eq!(
+            matches.len(),
+            1,
+            "smart case matches only exact casing when uppercase: {matches:?}"
+        );
+        assert_eq!(matches[0], (6, 11));
+    }
+
+    #[test]
+    fn pattern_smart_case_ignores_character_class_escapes() {
+        let pattern = Pattern::compile(r"\S+").unwrap();
+        assert_eq!(pattern.mode(), CaseMode::Smart);
+        let matches = pattern.find_in("abc XYZ");
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn pattern_explicit_case_modes() {
+        let sens = Pattern::compile_with_mode("hello", CaseMode::Sensitive).unwrap();
+        assert_eq!(sens.find_in("hello Hello HELLO").len(), 1);
+
+        let insens = Pattern::compile_with_mode("HELLO", CaseMode::Insensitive).unwrap();
+        assert_eq!(insens.find_in("hello Hello HELLO").len(), 3);
+
+        assert_eq!(CaseMode::Smart.cycle(), CaseMode::Sensitive);
+        assert_eq!(CaseMode::Sensitive.cycle(), CaseMode::Insensitive);
+        assert_eq!(CaseMode::Insensitive.cycle(), CaseMode::Smart);
     }
 
     #[test]

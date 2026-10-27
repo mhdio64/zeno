@@ -32,7 +32,7 @@ use zeno_cli::motion::{self, Motion};
 use zeno_cli::panel::{self, Palette};
 use zeno_cli::prompt::{Prompt, Purpose};
 use zeno_cli::render::{self, View, ViewState};
-use zeno_cli::search::{MatchPos, Pattern, Scope, SearchEvent, SearchJob};
+use zeno_cli::search::{CaseMode, MatchPos, Pattern, Scope, SearchEvent, SearchJob};
 use zeno_cli::sequence::{Action, Command, Operator, Sequences, Step, Target};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -138,11 +138,22 @@ fn layout_letter(c: char) -> Option<char> {
 /// A search prompt also shows how many matches the pattern has, as soon as
 /// the background scan has counted them: that is the number the user is
 /// really looking for while typing.
-fn prompt_line(prompt: &Prompt, search: Option<&Search>) -> Paragraph<'static> {
+fn prompt_line(prompt: &Prompt, search: Option<&Search>, case: CaseMode) -> Paragraph<'static> {
     let style = Style::default()
         .bg(Color::Rgb(28, 28, 34))
         .fg(Color::Yellow);
     let mut spans = vec![Span::styled(prompt.line(), style)];
+    if matches!(prompt.purpose(), Purpose::Search | Purpose::Replace) {
+        let mode_label = match case {
+            CaseMode::Smart => "",
+            CaseMode::Sensitive => "  [case: match]",
+            CaseMode::Insensitive => "  [case: ignore]",
+        };
+        if !mode_label.is_empty() {
+            let mode_style = Style::default().bg(Color::Rgb(28, 28, 34)).fg(Color::Cyan);
+            spans.push(Span::styled(mode_label, mode_style));
+        }
+    }
     if prompt.purpose() == Purpose::Search
         && let Some(total) = search.and_then(|search| search.total)
     {
@@ -543,6 +554,8 @@ struct Editor {
     autosave: bool,
     /// When the last key was handled, for the autosave timer.
     last_key: std::time::Instant,
+    /// How the search matches uppercase and lowercase letters.
+    search_case: CaseMode,
     /// The leader and the chords `zeno.toml` added, on top of the defaults.
     keys: Keymap,
 }
@@ -583,6 +596,7 @@ impl Editor {
             indent: indent::DEFAULT,
             autosave: false,
             last_key: std::time::Instant::now(),
+            search_case: CaseMode::Smart,
             keys: Keymap::default(),
         }
     }
@@ -957,6 +971,17 @@ impl Editor {
     /// Routes one key into the open prompt.
     fn handle_prompt_key(&mut self, key: KeyEvent) {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
+        if alt
+            && !ctrl
+            && let KeyCode::Char('c' | 'C') = key.code
+            && let Some(prompt) = self.prompt.as_ref()
+            && matches!(prompt.purpose(), Purpose::Search | Purpose::Replace)
+        {
+            self.search_case = self.search_case.cycle();
+            self.refresh_search();
+            return;
+        }
         let mut submit: Option<Answer> = None;
         let mut cancel = false;
         let mut escape_leaves_search = false;
@@ -984,12 +1009,12 @@ impl Editor {
                         submit = Some(Answer::Text(prompt.text().to_owned()));
                     }
                 }
-                KeyCode::Char(c) if !ctrl && !prompt.is_text() => {
+                KeyCode::Char(c) if !ctrl && !alt && !prompt.is_text() => {
                     if let Some(choice) = prompt.choose(c) {
                         submit = Some(Answer::Choice(choice));
                     }
                 }
-                KeyCode::Char(c) if !ctrl => {
+                KeyCode::Char(c) if !ctrl && !alt => {
                     prompt.insert(c);
                     edited = true;
                 }
@@ -1100,7 +1125,7 @@ impl Editor {
                         self.message = "nothing to replace".into();
                         return;
                     }
-                    match Pattern::compile(&text) {
+                    match Pattern::compile_with_mode(&text, self.search_case) {
                         Ok(pattern) => {
                             // The pattern is remembered twice: as what the
                             // viewport highlights while the answer is typed,
@@ -2427,7 +2452,7 @@ impl Editor {
             return;
         }
         let source = prompt.text().to_owned();
-        let compiled = Pattern::compile(&source);
+        let compiled = Pattern::compile_with_mode(&source, self.search_case);
         let note = compiled.as_ref().err().cloned();
         if let Some(prompt) = self.prompt.as_mut() {
             prompt.set_note(note);
@@ -2558,12 +2583,11 @@ impl Editor {
             self.clear_search();
             return;
         }
-        let ready = self
-            .search
-            .as_ref()
-            .is_some_and(|search| search.pattern.source() == text);
+        let ready = self.search.as_ref().is_some_and(|search| {
+            search.pattern.source() == text && search.pattern.mode() == self.search_case
+        });
         if !ready {
-            self.message = Pattern::compile(text)
+            self.message = Pattern::compile_with_mode(text, self.search_case)
                 .err()
                 .unwrap_or_else(|| "invalid pattern".into());
             return;
@@ -2846,7 +2870,10 @@ impl Editor {
                 // The question replaces the status line, so the document area
                 // keeps its size and nothing on screen moves.
                 Some(prompt) => {
-                    f.render_widget(prompt_line(prompt, self.search.as_ref()), status);
+                    f.render_widget(
+                        prompt_line(prompt, self.search.as_ref(), self.search_case),
+                        status,
+                    );
                     // A choice prompt has no caret: the answer is one letter.
                     if let Some(x) = prompt.cursor_column() {
                         f.set_cursor_position((x, status.y));
@@ -4193,6 +4220,58 @@ mod tests {
         sequence(&mut e, "f");
         assert!(e.prompt.is_some());
         assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::Search);
+    }
+
+    #[test]
+    fn find_smart_case_matches_various_casings() {
+        let (mut e, _p) = editor_with("find-smart.txt", b"foo Foo FOO\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "foo");
+        settle(&mut e);
+        assert_eq!(
+            e.search.as_ref().unwrap().total,
+            Some(3),
+            "lowercase pattern matches all casings"
+        );
+
+        while !prompt_text(&e).as_deref().unwrap_or("").is_empty() {
+            e.handle_key(key(KeyCode::Backspace));
+        }
+        type_into_prompt(&mut e, "Foo");
+        settle(&mut e);
+        assert_eq!(
+            e.search.as_ref().unwrap().total,
+            Some(1),
+            "uppercase pattern matches only exact case"
+        );
+    }
+
+    #[test]
+    fn alt_c_in_find_prompt_cycles_case_mode() {
+        let (mut e, _p) = editor_with("find-alt-c.txt", b"foo Foo FOO\n");
+        e.handle_key(chord(KeyCode::Char('\u{06}')));
+        type_into_prompt(&mut e, "foo");
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(3));
+        assert_eq!(e.search_case, CaseMode::Smart);
+
+        // Press Alt+C -> CaseMode::Sensitive
+        e.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert_eq!(e.search_case, CaseMode::Sensitive);
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(1));
+
+        // Press Alt+C again -> CaseMode::Insensitive
+        e.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert_eq!(e.search_case, CaseMode::Insensitive);
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(3));
+
+        // Press Alt+C again -> CaseMode::Smart
+        e.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT));
+        assert_eq!(e.search_case, CaseMode::Smart);
+        settle(&mut e);
+        assert_eq!(e.search.as_ref().unwrap().total, Some(3));
     }
 
     #[test]
