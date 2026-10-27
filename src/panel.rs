@@ -121,6 +121,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::ToggleScrollbar,
     },
     Entry {
+        keys: "ctrl+n",
+        label: "Complete word",
+        command: Command::CompleteWord,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

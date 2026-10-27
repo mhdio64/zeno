@@ -44,6 +44,8 @@ pub enum Command {
     MoveLineUp,
     /// Moves the current line or selection down one line (`Alt+Down`).
     MoveLineDown,
+    /// Word auto-completion from the current buffer (`Ctrl+N`).
+    CompleteWord,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -78,6 +80,7 @@ impl Command {
             Command::ToggleLineComment => "toggle_line_comment",
             Command::MoveLineUp => "move_line_up",
             Command::MoveLineDown => "move_line_down",
+            Command::CompleteWord => "complete_word",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -124,6 +127,7 @@ impl Command {
             "toggle_line_comment" | "comment" => Command::ToggleLineComment,
             "move_line_up" | "move_up" => Command::MoveLineUp,
             "move_line_down" | "move_down" => Command::MoveLineDown,
+            "complete_word" | "complete" | "autocomplete" => Command::CompleteWord,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -547,6 +551,7 @@ mod tests {
             Command::ToggleLineComment,
             Command::MoveLineUp,
             Command::MoveLineDown,
+            Command::CompleteWord,
             Command::Help,
             Command::Palette,
         ] {

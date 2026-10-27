@@ -6,6 +6,7 @@
 //! isolation by the `zeno-bench` binary, without a terminal attached.
 
 pub mod clipboard;
+pub mod complete;
 pub mod config;
 pub mod doc;
 pub mod finder;

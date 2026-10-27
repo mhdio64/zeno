@@ -22,6 +22,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
 
 use zeno_cli::clipboard;
+use zeno_cli::complete::{self, Completion};
 use zeno_cli::config::{self, Config};
 use zeno_cli::doc::edit::Pos;
 use zeno_cli::doc::{Doc, Snapshot, identity_of};
@@ -562,6 +563,8 @@ struct Editor {
     keys: Keymap,
     /// Visited files and their viewport positions.
     recent_files: RecentList,
+    /// Active word completion session state (`Ctrl+N`).
+    completion: Option<Completion>,
 }
 
 /// A panel that covers the document while it is open.
@@ -609,6 +612,7 @@ impl Editor {
             search_case: CaseMode::Smart,
             keys: Keymap::default(),
             recent_files: RecentList::new(),
+            completion: None,
         }
     }
 
@@ -763,6 +767,31 @@ impl Editor {
             return;
         }
 
+        // An active word completion session handles its navigation keys (^N, ^P, Esc, Enter, Tab).
+        if self.completion.is_some() {
+            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+            if ctrl && chord_letter(key.code) == Some('n') {
+                self.complete_next();
+                return;
+            }
+            if ctrl && chord_letter(key.code) == Some('p') {
+                self.complete_prev();
+                return;
+            }
+            if key.code == KeyCode::Esc {
+                self.cancel_completion();
+                return;
+            }
+            if key.code == KeyCode::Enter || key.code == KeyCode::Tab {
+                self.accept_completion();
+                return;
+            }
+            self.completion = None;
+            if self.message.starts_with('[') {
+                self.message.clear();
+            }
+        }
+
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
@@ -850,6 +879,10 @@ impl Editor {
                 }
                 Some('p') => {
                     self.open_palette();
+                    return;
+                }
+                Some('n') => {
+                    self.start_completion();
                     return;
                 }
                 Some('o') => {
@@ -1401,6 +1434,13 @@ impl Editor {
             Command::AlternateFile => self.switch_to_alternate_file(),
             Command::SelectTheme => self.open_theme_picker(),
             Command::ToggleScrollbar => self.toggle_scrollbar(),
+            Command::CompleteWord => {
+                if self.completion.is_some() {
+                    self.complete_next();
+                } else {
+                    self.start_completion();
+                }
+            }
         }
     }
 
@@ -1708,6 +1748,103 @@ impl Editor {
         } else {
             "scrollbar off".into()
         };
+    }
+
+    /// Starts a word auto-completion session (`Ctrl+N`).
+    fn start_completion(&mut self) {
+        let line = self.view.cursor_line;
+        let col = self.view.cursor_col;
+        let text = self.line_text(line);
+        let Some((start_col, prefix)) = complete::find_prefix(&text, col) else {
+            self.message = "no word to complete".into();
+            return;
+        };
+        let cursor = Pos::new(line, col);
+        let candidates = complete::find_candidates(&self.doc, cursor, &prefix);
+        if candidates.is_empty() {
+            self.message = format!("no completions for '{prefix}'");
+            return;
+        }
+        let comp = Completion::new(line, start_col, prefix, candidates);
+        let replacement = comp.current_text().to_string();
+        self.doc
+            .edit(Pos::new(line, start_col), Pos::new(line, col), &replacement);
+        self.dirty = true;
+        self.view.cursor_col = start_col + replacement.chars().count();
+        self.message = comp.status_message();
+        self.completion = Some(comp);
+        self.ensure_cursor_visible();
+    }
+
+    /// Advances to the next completion candidate (`Ctrl+N`).
+    fn complete_next(&mut self) {
+        let Some(mut comp) = self.completion.take() else {
+            return;
+        };
+        let line = comp.line;
+        let start_col = comp.start_col;
+        let prev_len = comp.current_text().chars().count();
+        let next_text = comp.cycle_next().to_string();
+        let next_len = next_text.chars().count();
+
+        self.doc.edit(
+            Pos::new(line, start_col),
+            Pos::new(line, start_col + prev_len),
+            &next_text,
+        );
+        self.dirty = true;
+        self.view.cursor_col = start_col + next_len;
+        self.message = comp.status_message();
+        self.completion = Some(comp);
+        self.ensure_cursor_visible();
+    }
+
+    /// Moves to the previous completion candidate (`Ctrl+P`).
+    fn complete_prev(&mut self) {
+        let Some(mut comp) = self.completion.take() else {
+            return;
+        };
+        let line = comp.line;
+        let start_col = comp.start_col;
+        let prev_len = comp.current_text().chars().count();
+        let next_text = comp.cycle_prev().to_string();
+        let next_len = next_text.chars().count();
+
+        self.doc.edit(
+            Pos::new(line, start_col),
+            Pos::new(line, start_col + prev_len),
+            &next_text,
+        );
+        self.dirty = true;
+        self.view.cursor_col = start_col + next_len;
+        self.message = comp.status_message();
+        self.completion = Some(comp);
+        self.ensure_cursor_visible();
+    }
+
+    /// Cancels completion and restores original typed prefix (`Esc`).
+    fn cancel_completion(&mut self) {
+        let Some(comp) = self.completion.take() else {
+            return;
+        };
+        let line = comp.line;
+        let start_col = comp.start_col;
+        let current_len = comp.current_text().chars().count();
+        self.doc.edit(
+            Pos::new(line, start_col),
+            Pos::new(line, start_col + current_len),
+            &comp.original,
+        );
+        self.dirty = true;
+        self.view.cursor_col = start_col + comp.original.chars().count();
+        self.message.clear();
+        self.ensure_cursor_visible();
+    }
+
+    /// Accepts the current completion candidate (`Enter`, `Tab`).
+    fn accept_completion(&mut self) {
+        self.completion = None;
+        self.message.clear();
     }
 
     /// `Ctrl+/`: comments out the touched lines, or uncomments them.
@@ -5901,5 +6038,98 @@ mod tests {
 
         e.handle_key(chord(KeyCode::Right));
         assert_eq!(e.prompt.as_ref().unwrap().cursor(), 11);
+    }
+
+    #[test]
+    fn ctrl_n_completes_word_and_cycles_candidates() {
+        let (mut e, _p) = editor_with(
+            "complete-cycle.txt",
+            b"let my_variable = 1;\nlet my_vector = 2;\nlet my_",
+        );
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 7;
+
+        // 1st Ctrl+N -> completes to closest match "my_vector"
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 2), "let my_vector");
+        assert_eq!(e.view.cursor_col, 13);
+        assert!(e.completion.is_some());
+        assert!(e.message.contains("[1/2]"));
+
+        // 2nd Ctrl+N -> cycles to "my_variable"
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 2), "let my_variable");
+        assert_eq!(e.view.cursor_col, 15);
+        assert!(e.message.contains("[2/2]"));
+
+        // 3rd Ctrl+N -> cycles to original prefix "my_"
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 2), "let my_");
+        assert_eq!(e.view.cursor_col, 7);
+        assert!(e.message.contains("[original]"));
+
+        // 4th Ctrl+N -> cycles back to "my_vector"
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 2), "let my_vector");
+
+        // Ctrl+P -> cycles backwards to original
+        e.handle_key(chord(KeyCode::Char('p')));
+        assert_eq!(line(&e, 2), "let my_");
+
+        // Enter accepts completion
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.completion.is_none());
+        assert_eq!(line(&e, 2), "let my_");
+    }
+
+    #[test]
+    fn ctrl_n_esc_cancels_completion_and_restores_prefix() {
+        let (mut e, _p) = editor_with("complete-esc.txt", b"first_candidate\nsecond_candidate\nfi");
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 2;
+
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 2), "first_candidate");
+        assert!(e.completion.is_some());
+
+        e.handle_key(key(KeyCode::Esc));
+        assert_eq!(line(&e, 2), "fi");
+        assert_eq!(e.view.cursor_col, 2);
+        assert!(e.completion.is_none());
+    }
+
+    #[test]
+    fn ctrl_n_accepts_when_typing_other_keys() {
+        let (mut e, _p) = editor_with("complete-accept.txt", b"calculate_total\ncalc");
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 4;
+
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(line(&e, 1), "calculate_total");
+        assert!(e.completion.is_some());
+
+        // Typing ';' accepts completion and inserts ';'
+        e.handle_key(key(KeyCode::Char(';')));
+        assert_eq!(line(&e, 1), "calculate_total;");
+        assert!(e.completion.is_none());
+    }
+
+    #[test]
+    fn ctrl_n_with_no_prefix_or_no_matches_shows_message() {
+        let (mut e, _p) = editor_with("complete-none.txt", b"hello world\n   \n");
+        // On whitespace line
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 2;
+        e.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(e.message, "no word to complete");
+        assert!(e.completion.is_none());
+
+        // On word with no other matches
+        let (mut e2, _p2) = editor_with("complete-nomatch.txt", b"xyz_unique");
+        e2.view.cursor_line = 0;
+        e2.view.cursor_col = 10;
+        e2.handle_key(chord(KeyCode::Char('n')));
+        assert_eq!(e2.message, "no completions for 'xyz_unique'");
+        assert!(e2.completion.is_none());
     }
 }
