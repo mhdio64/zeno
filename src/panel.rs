@@ -91,6 +91,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::ToggleWordWrap,
     },
     Entry {
+        keys: "alt+up",
+        label: "Move line up",
+        command: Command::MoveLineUp,
+    },
+    Entry {
+        keys: "alt+down",
+        label: "Move line down",
+        command: Command::MoveLineDown,
+    },
+    Entry {
         keys: "leader ]",
         label: "Indent line",
         command: Command::IndentLine,

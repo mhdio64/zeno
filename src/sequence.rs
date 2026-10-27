@@ -34,6 +34,10 @@ pub enum Command {
     /// It has no leader mnemonic of its own: the chord is the binding, and
     /// the palette reaches it through this name.
     ToggleLineComment,
+    /// Moves the current line or selection up one line (`Alt+Up`).
+    MoveLineUp,
+    /// Moves the current line or selection down one line (`Alt+Down`).
+    MoveLineDown,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -60,6 +64,8 @@ impl Command {
             Command::IndentLine => "indent_line",
             Command::UnindentLine => "unindent_line",
             Command::ToggleLineComment => "toggle_line_comment",
+            Command::MoveLineUp => "move_line_up",
+            Command::MoveLineDown => "move_line_down",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -96,6 +102,8 @@ impl Command {
             "indent_line" => Command::IndentLine,
             "unindent_line" => Command::UnindentLine,
             "toggle_line_comment" | "comment" => Command::ToggleLineComment,
+            "move_line_up" | "move_up" => Command::MoveLineUp,
+            "move_line_down" | "move_down" => Command::MoveLineDown,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -506,6 +514,8 @@ mod tests {
             Command::IndentLine,
             Command::UnindentLine,
             Command::ToggleLineComment,
+            Command::MoveLineUp,
+            Command::MoveLineDown,
             Command::Help,
             Command::Palette,
         ] {

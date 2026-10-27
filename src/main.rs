@@ -747,6 +747,14 @@ impl Editor {
                 self.toggle_word_wrap();
                 return;
             }
+            if let KeyCode::Up = key.code {
+                self.move_line_up();
+                return;
+            }
+            if let KeyCode::Down = key.code {
+                self.move_line_down();
+                return;
+            }
         }
         if ctrl {
             // `Ctrl+/` arrives as `/` from a console key, and as the control
@@ -1310,6 +1318,8 @@ impl Editor {
             Command::NextMatch => self.next_match(),
             Command::PreviousMatch => self.previous_match(),
             Command::ToggleLineComment => self.toggle_line_comment(),
+            Command::MoveLineUp => self.move_line_up(),
+            Command::MoveLineDown => self.move_line_down(),
             Command::Help => self.open_help(),
             Command::Palette => self.open_palette(),
         }
@@ -2013,6 +2023,91 @@ impl Editor {
         self.move_to(Pos::new(line + 1, col));
         self.dirty = true;
         self.message.clear();
+    }
+
+    /// `Alt+Up`: moves the current line or selection up one line.
+    fn move_line_up(&mut self) {
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        let first = from.line;
+        let last = if to.col == 0 && to.line > first {
+            to.line - 1
+        } else {
+            to.line
+        };
+
+        if first == 0 {
+            return;
+        }
+
+        let above = first - 1;
+        let range_start = Pos::new(above, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        if !self.range_is_affordable(range_start, range_end) {
+            self.message = self.too_large(range_start, range_end);
+            return;
+        }
+
+        let above_text = self.line_text(above);
+        let block_text = self
+            .doc
+            .text_in_range(Pos::new(first, 0), Pos::new(last, self.line_len(last)));
+
+        let replaced = format!("{block_text}\n{above_text}");
+        self.doc.edit(range_start, range_end, &replaced);
+
+        if let Some(anchor) = self.view.anchor {
+            let line = anchor.line.saturating_sub(1);
+            let col = anchor.col.min(self.line_len(line));
+            self.view.anchor = Some(Pos::new(line, col));
+        }
+        self.view.cursor_line = self.view.cursor_line.saturating_sub(1);
+        self.clamp_column();
+        self.dirty = true;
+        self.message.clear();
+        self.ensure_cursor_visible();
+    }
+
+    /// `Alt+Down`: moves the current line or selection down one line.
+    fn move_line_down(&mut self) {
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        let first = from.line;
+        let last = if to.col == 0 && to.line > first {
+            to.line - 1
+        } else {
+            to.line
+        };
+
+        let total = self.doc.line_count();
+        if last + 1 >= total {
+            return;
+        }
+
+        let below = last + 1;
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(below, self.line_len(below));
+        if !self.range_is_affordable(range_start, range_end) {
+            self.message = self.too_large(range_start, range_end);
+            return;
+        }
+
+        let below_text = self.line_text(below);
+        let block_text = self
+            .doc
+            .text_in_range(Pos::new(first, 0), Pos::new(last, self.line_len(last)));
+
+        let replaced = format!("{below_text}\n{block_text}");
+        self.doc.edit(range_start, range_end, &replaced);
+
+        if let Some(anchor) = self.view.anchor {
+            let line = anchor.line + 1;
+            let col = anchor.col.min(self.line_len(line));
+            self.view.anchor = Some(Pos::new(line, col));
+        }
+        self.view.cursor_line += 1;
+        self.clamp_column();
+        self.dirty = true;
+        self.message.clear();
+        self.ensure_cursor_visible();
     }
 
     fn undo(&mut self) {
@@ -2972,6 +3067,69 @@ mod tests {
         assert_eq!(line(&e, 1), "ab");
         assert_eq!(line(&e, 2), "cd");
         assert_eq!(e.view.cursor_line, 1);
+    }
+
+    #[test]
+    fn alt_up_and_down_move_the_current_line() {
+        let (mut e, _p) = editor_with("move-line.txt", b"one\ntwo\nthree\n");
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 1;
+        e.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "one");
+        assert_eq!(line(&e, 1), "three");
+        assert_eq!(line(&e, 2), "two");
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.view.cursor_col, 1);
+
+        e.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "one");
+        assert_eq!(line(&e, 1), "two");
+        assert_eq!(line(&e, 2), "three");
+        assert_eq!(e.view.cursor_line, 1);
+
+        e.undo();
+        assert_eq!(line(&e, 0), "one");
+        assert_eq!(line(&e, 1), "three");
+        assert_eq!(line(&e, 2), "two");
+    }
+
+    #[test]
+    fn alt_up_and_down_move_a_selection() {
+        let (mut e, _p) = editor_with("move-sel.txt", b"first\nsecond\nthird\nfourth\n");
+        e.view.anchor = Some(Pos::new(1, 0));
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 5;
+        e.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "first");
+        assert_eq!(line(&e, 1), "fourth");
+        assert_eq!(line(&e, 2), "second");
+        assert_eq!(line(&e, 3), "third");
+        assert_eq!(e.view.anchor, Some(Pos::new(2, 0)));
+        assert_eq!(e.view.cursor_line, 3);
+
+        e.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "first");
+        assert_eq!(line(&e, 1), "second");
+        assert_eq!(line(&e, 2), "third");
+        assert_eq!(line(&e, 3), "fourth");
+        assert_eq!(e.view.anchor, Some(Pos::new(1, 0)));
+        assert_eq!(e.view.cursor_line, 2);
+    }
+
+    #[test]
+    fn moving_at_document_boundaries_does_nothing() {
+        let (mut e, _p) = editor_with("move-bounds.txt", b"top\nbottom\n");
+        e.view.cursor_line = 0;
+        e.handle_key(KeyEvent::new(KeyCode::Up, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "top");
+        assert_eq!(line(&e, 1), "bottom");
+        assert!(!e.dirty);
+
+        e.view.cursor_line = 1;
+        e.handle_key(KeyEvent::new(KeyCode::Down, KeyModifiers::ALT));
+        assert_eq!(line(&e, 0), "top");
+        assert_eq!(line(&e, 1), "bottom");
+        assert!(!e.dirty);
     }
 
     #[test]
