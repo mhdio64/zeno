@@ -60,6 +60,8 @@ pub struct ViewState {
     pub anchor: Option<Pos>,
     /// Optional pattern for search highlight rendering.
     pub highlight_pattern: Option<Pattern>,
+    /// Whether the visual scrollbar is drawn at the right edge.
+    pub show_scrollbar: bool,
 }
 
 impl Default for ViewState {
@@ -76,6 +78,7 @@ impl Default for ViewState {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         }
     }
 }
@@ -114,6 +117,32 @@ impl<'a> View<'a> {
             return 0;
         }
         (self.doc.gutter_digits() + 1).max(4)
+    }
+
+    /// Whether the visual scrollbar should be rendered.
+    ///
+    /// The scrollbar is drawn when enabled in settings, when the viewport has
+    /// enough room to display text alongside it, and when the document is
+    /// taller than the screen.
+    pub fn show_scrollbar(&self, height: u16, width: u16) -> bool {
+        if !self.state.show_scrollbar || width <= self.gutter_width() + 2 || height <= 1 {
+            return false;
+        }
+        let total = self
+            .doc
+            .total_lines()
+            .unwrap_or_else(|| self.doc.line_count())
+            .max(self.state.top_line + height as u64);
+        total > height as u64
+    }
+
+    /// Width of the visual scrollbar, in columns (1 if visible, 0 if hidden).
+    pub fn scrollbar_width(&self, height: u16, width: u16) -> u16 {
+        if self.show_scrollbar(height, width) {
+            1
+        } else {
+            0
+        }
     }
 
     /// The selected columns of `line`, as a half-open range.
@@ -272,7 +301,8 @@ impl<'a> View<'a> {
     /// the scroll that answers it.
     pub fn cursor_position(&self, area: Rect) -> Option<(u16, u16)> {
         let gutter = self.gutter_width();
-        let body_width = area.width.saturating_sub(gutter);
+        let scrollbar = self.scrollbar_width(area.height, area.width);
+        let body_width = area.width.saturating_sub(gutter).saturating_sub(scrollbar);
         if body_width == 0 {
             return None;
         }
@@ -554,8 +584,9 @@ impl Widget for View<'_> {
         }
 
         let gutter = self.gutter_width();
+        let scrollbar = self.scrollbar_width(area.height, area.width);
         let body_x = area.x + gutter;
-        let body_width = area.width.saturating_sub(gutter);
+        let body_width = area.width.saturating_sub(gutter).saturating_sub(scrollbar);
         if body_width == 0 {
             return;
         }
@@ -645,6 +676,46 @@ impl Widget for View<'_> {
         Paragraph::new(Text::from(body_lines))
             .style(Style::default().bg(self.theme.bg).fg(self.theme.fg))
             .render(body_area, buf);
+
+        if scrollbar > 0 {
+            let scrollbar_x = area.x + area.width - 1;
+            let total = self
+                .doc
+                .total_lines()
+                .unwrap_or_else(|| self.doc.line_count())
+                .max(self.state.top_line + area.height as u64);
+            let height = area.height as usize;
+            let thumb_height =
+                ((height as u64 * height as u64) / total).clamp(1, height as u64) as usize;
+            let max_top = total.saturating_sub(area.height as u64);
+            let track_room = height.saturating_sub(thumb_height);
+            let dividend = (self.state.top_line * track_room as u64) + max_top / 2;
+            let thumb_top = dividend
+                .checked_div(max_top)
+                .map(|t| (t as usize).min(track_room))
+                .unwrap_or(0);
+            let thumb_bottom = thumb_top + thumb_height;
+
+            let track_style = Style::default()
+                .fg(self.theme.scrollbar_track())
+                .bg(self.theme.bg);
+            let thumb_style = Style::default()
+                .fg(self.theme.scrollbar_thumb())
+                .bg(self.theme.bg);
+
+            for row in 0..area.height {
+                let y = area.y + row;
+                let (sym, style) = if (row as usize) >= thumb_top && (row as usize) < thumb_bottom {
+                    ("█", thumb_style)
+                } else {
+                    ("│", track_style)
+                };
+                if let Some(cell) = buf.cell_mut((scrollbar_x, y)) {
+                    cell.set_symbol(sym);
+                    cell.set_style(style);
+                }
+            }
+        }
     }
 }
 
@@ -662,7 +733,9 @@ mod tests {
         let path = dir.join(name);
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(contents).unwrap();
-        Doc::open(&path).unwrap()
+        let mut doc = Doc::open(&path).unwrap();
+        doc.index_fully();
+        doc
     }
 
     fn frame_text(doc: &Doc, state: &ViewState, w: u16, h: u16) -> String {
@@ -705,6 +778,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let text = frame_text(&doc, &state, 20, 4);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -736,6 +810,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("alpha"), "{text}");
@@ -757,6 +832,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("three"), "{text}");
@@ -778,6 +854,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 4)));
@@ -821,6 +898,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -843,6 +921,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -868,6 +947,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+            show_scrollbar: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -903,6 +983,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 6)),
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+            show_scrollbar: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -941,6 +1022,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
+            show_scrollbar: true,
         };
         let view = View::new(&doc, &state);
         assert!(view.match_ranges(0, 20).is_empty());
@@ -961,6 +1043,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 20, 3);
@@ -984,6 +1067,7 @@ mod tests {
             left_col,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         }
     }
 
@@ -1136,6 +1220,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         }
     }
 
@@ -1176,6 +1261,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let text = frame_text(&doc, &state, 16, 5);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -1242,6 +1328,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1268,6 +1355,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1298,6 +1386,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
+            show_scrollbar: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1343,6 +1432,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1367,6 +1457,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1390,6 +1481,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let buffer = draw(&doc, &state, None);
         assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
@@ -1411,6 +1503,7 @@ mod tests {
             left_col: 0,
             anchor: None,
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::MONOKAI);
         // Cursor line gets Monokai's #3e3d32
@@ -1437,6 +1530,7 @@ mod tests {
             left_col: 0,
             anchor: Some(Pos::new(0, 0)),
             highlight_pattern: None,
+            show_scrollbar: true,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::SOLARIZED_LIGHT);
         // Selection is dark navy #073642 on light theme
@@ -1446,5 +1540,95 @@ mod tests {
         // Non-selected line 1 gets cream #fdf6e3 and dark text #657b83
         assert_eq!(buffer[(0, 1)].bg, ThemeColors::SOLARIZED_LIGHT.bg);
         assert_eq!(buffer[(0, 1)].fg, ThemeColors::SOLARIZED_LIGHT.fg);
+    }
+
+    #[test]
+    fn scrollbar_hidden_when_content_fits_viewport() {
+        let doc = doc_of("short.txt", b"line 1\nline 2\nline 3\n");
+        let state = ViewState {
+            top_line: 0,
+            show_scrollbar: true,
+            ..ViewState::default()
+        };
+        let view = View::new(&doc, &state);
+        assert!(!view.show_scrollbar(5, 20));
+        assert_eq!(view.scrollbar_width(5, 20), 0);
+    }
+
+    #[test]
+    fn scrollbar_renders_track_and_thumb_when_content_overflows() {
+        let text = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let doc = doc_of("long.txt", text.as_bytes());
+        let state = ViewState {
+            top_line: 0,
+            show_scrollbar: true,
+            show_line_numbers: false,
+            ..ViewState::default()
+        };
+        let view = View::new(&doc, &state);
+        assert!(view.show_scrollbar(5, 20));
+        assert_eq!(view.scrollbar_width(5, 20), 1);
+
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // At top_line = 0, row 0 on the rightmost column (19) has thumb '█'
+        assert_eq!(buffer[(19, 0)].symbol(), "█");
+        // Rows below the thumb have track '│'
+        assert_eq!(buffer[(19, 4)].symbol(), "│");
+    }
+
+    #[test]
+    fn scrollbar_thumb_moves_when_viewport_scrolls() {
+        let text = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let doc = doc_of("scrolled.txt", text.as_bytes());
+        let state = ViewState {
+            top_line: 15,
+            cursor_line: 15,
+            show_scrollbar: true,
+            show_line_numbers: false,
+            ..ViewState::default()
+        };
+        let view = View::new(&doc, &state);
+        let backend = TestBackend::new(20, 5);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // At top_line = 15 (near bottom of 20 lines with height 5), row 4 has thumb '█'
+        assert_eq!(buffer[(19, 4)].symbol(), "█");
+        // Top row has track '│'
+        assert_eq!(buffer[(19, 0)].symbol(), "│");
+    }
+
+    #[test]
+    fn scrollbar_hidden_when_disabled_in_view_state() {
+        let text = (1..=20)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let doc = doc_of("disabled.txt", text.as_bytes());
+        let state = ViewState {
+            top_line: 0,
+            show_scrollbar: false,
+            ..ViewState::default()
+        };
+        let view = View::new(&doc, &state);
+        assert!(!view.show_scrollbar(5, 20));
+        assert_eq!(view.scrollbar_width(5, 20), 0);
     }
 }

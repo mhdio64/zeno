@@ -621,6 +621,7 @@ impl Editor {
         self.view.word_wrap = settings.word_wrap;
         self.view.show_line_numbers = settings.line_numbers;
         self.view.show_relative_numbers = settings.relative_line_numbers;
+        self.view.show_scrollbar = settings.scrollbar;
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
         self.autosave = settings.autosave;
@@ -1379,6 +1380,7 @@ impl Editor {
             Command::RecentFiles => self.open_recent_picker(),
             Command::AlternateFile => self.switch_to_alternate_file(),
             Command::SelectTheme => self.open_theme_picker(),
+            Command::ToggleScrollbar => self.toggle_scrollbar(),
         }
     }
 
@@ -1677,6 +1679,15 @@ impl Editor {
             "word wrap off".into()
         };
         self.ensure_cursor_visible();
+    }
+
+    fn toggle_scrollbar(&mut self) {
+        self.view.show_scrollbar = !self.view.show_scrollbar;
+        self.message = if self.view.show_scrollbar {
+            "scrollbar on".into()
+        } else {
+            "scrollbar off".into()
+        };
     }
 
     /// `Ctrl+/`: comments out the touched lines, or uncomments them.
@@ -3117,9 +3128,11 @@ impl Editor {
 
         self.viewport_height_hint = body.height;
         // The width the editor scrolls by is the width of the *text*, not the
-        // width of the screen: the gutter takes some of it.
-        let gutter = View::new(&self.doc, &self.view).gutter_width();
-        self.view.width = body.width.saturating_sub(gutter);
+        // width of the screen: the gutter and scrollbar take some of it.
+        let view_calc = View::new(&self.doc, &self.view);
+        let gutter = view_calc.gutter_width();
+        let scrollbar = view_calc.scrollbar_width(body.height, body.width);
+        self.view.width = body.width.saturating_sub(gutter).saturating_sub(scrollbar);
         // The window may have changed shape since the last move, so the
         // cursor is brought back into view before anything is painted.
         self.ensure_cursor_visible();
@@ -5789,5 +5802,26 @@ mod tests {
         e.handle_key(key(KeyCode::Home));
         assert_eq!(e.view.cursor_col, 0);
         assert_eq!(e.view.left_col, 0);
+    }
+
+    #[test]
+    fn leader_pipe_toggles_visual_scrollbar() {
+        let (mut e, _p) = editor_with("scrollbar-toggle.txt", b"hello\n");
+        assert!(e.view.show_scrollbar);
+        sequence(&mut e, "|");
+        assert!(!e.view.show_scrollbar);
+        assert_eq!(e.message, "scrollbar off");
+        sequence(&mut e, "|");
+        assert!(e.view.show_scrollbar);
+        assert_eq!(e.message, "scrollbar on");
+    }
+
+    #[test]
+    fn config_scrollbar_setting_is_applied() {
+        let (mut e, _p) = editor_with("scrollbar-cfg.txt", b"hello\n");
+        assert!(e.view.show_scrollbar);
+        let cfg = zeno_cli::config::parse_config("[settings]\nscrollbar = false\n");
+        e.apply_settings(&cfg);
+        assert!(!e.view.show_scrollbar);
     }
 }

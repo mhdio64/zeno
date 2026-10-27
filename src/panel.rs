@@ -116,6 +116,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::ToggleWordWrap,
     },
     Entry {
+        keys: "leader |",
+        label: "Toggle scrollbar",
+        command: Command::ToggleScrollbar,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

@@ -169,6 +169,22 @@ impl ThemeColors {
             _ => Self::OCEAN_DARK,
         }
     }
+
+    /// Color for the scrollbar track line.
+    pub fn scrollbar_track(&self) -> Color {
+        self.gutter_fg
+    }
+
+    /// Color for the visual scrollbar thumb.
+    pub fn scrollbar_thumb(&self) -> Color {
+        if !self.is_dark {
+            Color::Rgb(101, 123, 131)
+        } else if self.bg == Color::Black && self.fg == Color::White {
+            Color::White
+        } else {
+            self.fg
+        }
+    }
 }
 
 impl Default for ThemeColors {

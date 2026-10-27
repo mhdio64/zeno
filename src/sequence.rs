@@ -25,6 +25,7 @@ pub enum Command {
     ToggleGutter,
     ToggleRelativeGutter,
     ToggleWordWrap,
+    ToggleScrollbar,
     GoToLine,
     Find,
     Replace,
@@ -66,6 +67,7 @@ impl Command {
             Command::ToggleGutter => "toggle_line_numbers",
             Command::ToggleRelativeGutter => "toggle_relative_line_numbers",
             Command::ToggleWordWrap => "toggle_word_wrap",
+            Command::ToggleScrollbar => "toggle_scrollbar",
             Command::GoToLine => "go_to_line",
             Command::Find => "find",
             Command::Replace => "replace",
@@ -111,6 +113,7 @@ impl Command {
                 Command::ToggleRelativeGutter
             }
             "toggle_word_wrap" | "word_wrap" => Command::ToggleWordWrap,
+            "toggle_scrollbar" | "scrollbar" => Command::ToggleScrollbar,
             "go_to_line" | "goto_line" => Command::GoToLine,
             "find" => Command::Find,
             "replace" => Command::Replace,
@@ -303,6 +306,7 @@ impl Sequences {
             ',' => Some(Command::ToggleGutter),
             '.' => Some(Command::ToggleRelativeGutter),
             'w' => Some(Command::ToggleWordWrap),
+            '|' => Some(Command::ToggleScrollbar),
             'g' => Some(Command::GoToLine),
             'f' => Some(Command::Find),
             'r' => Some(Command::Replace),
@@ -532,6 +536,7 @@ mod tests {
             Command::ToggleGutter,
             Command::ToggleRelativeGutter,
             Command::ToggleWordWrap,
+            Command::ToggleScrollbar,
             Command::GoToLine,
             Command::Find,
             Command::Replace,
@@ -588,6 +593,14 @@ mod tests {
         assert_eq!(
             run("w"),
             Step::Action(Action::Command(Command::ToggleWordWrap))
+        );
+    }
+
+    #[test]
+    fn scrollbar_is_a_standalone_command() {
+        assert_eq!(
+            run("|"),
+            Step::Action(Action::Command(Command::ToggleScrollbar))
         );
     }
 

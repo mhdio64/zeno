@@ -29,6 +29,8 @@ pub struct Settings {
     pub autosave: bool,
     /// The syntax highlighting theme name. `None` uses the default dark theme.
     pub theme: Option<String>,
+    /// Draw the visual scrollbar on the right edge.
+    pub scrollbar: bool,
 }
 
 impl Default for Settings {
@@ -41,6 +43,7 @@ impl Default for Settings {
             auto_pair: true,
             autosave: false,
             theme: None,
+            scrollbar: true,
         }
     }
 }
@@ -210,6 +213,7 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "relative_line_numbers" => set_bool(&mut settings.relative_line_numbers, value),
         "auto_pair" => set_bool(&mut settings.auto_pair, value),
         "autosave" => set_bool(&mut settings.autosave, value),
+        "scrollbar" => set_bool(&mut settings.scrollbar, value),
         "theme" => {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -340,6 +344,7 @@ mod tests {
         assert_eq!(settings.tab_width, 4);
         assert!(settings.auto_pair);
         assert!(!settings.autosave);
+        assert!(settings.scrollbar);
     }
 
     #[test]
@@ -353,6 +358,7 @@ relative_line_numbers = true
 tab_width = 2
 auto_pair = false
 autosave = true
+scrollbar = false
 "#,
         );
         assert!(settings.word_wrap);
@@ -361,6 +367,7 @@ autosave = true
         assert_eq!(settings.tab_width, 2);
         assert!(!settings.auto_pair);
         assert!(settings.autosave);
+        assert!(!settings.scrollbar);
     }
 
     #[test]
