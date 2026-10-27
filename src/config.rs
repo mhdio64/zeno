@@ -73,8 +73,12 @@ pub struct Config {
 /// Where the config file lives, if the platform says.
 ///
 /// Windows keeps it under `%APPDATA%`; everything else follows the XDG rule
-/// with `~/.config` as the fallback (spec §6).
+/// with `~/.config` as the fallback (spec §6). A custom path can be supplied
+/// via the `ZENO_CONFIG_PATH` environment variable.
 pub fn config_path() -> Option<PathBuf> {
+    if let Some(custom) = std::env::var_os("ZENO_CONFIG_PATH") {
+        return Some(PathBuf::from(custom));
+    }
     Some(config_dir()?.join("zeno.toml"))
 }
 
@@ -249,6 +253,80 @@ fn strip_comment(line: &str) -> &str {
     }
     line
 }
+
+/// Updates or creates the `theme` setting in a config text, preserving comments,
+/// whitespace, and all other sections.
+pub fn update_theme_in_text(text: &str, theme_name: &str) -> String {
+    if text.trim().is_empty() {
+        return format!("[settings]\ntheme = \"{theme_name}\"\n");
+    }
+
+    let is_crlf = text.contains("\r\n");
+    let ending = if is_crlf { "\r\n" } else { "\n" };
+
+    let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
+    let mut current_section = String::new();
+    let mut settings_header_idx: Option<usize> = None;
+    let mut theme_line_idx: Option<usize> = None;
+
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = strip_comment(line).trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') {
+            let section_name = trimmed.trim_start_matches('[').trim_end_matches(']').trim();
+            current_section = section_name.to_owned();
+            if current_section == "settings" && settings_header_idx.is_none() {
+                settings_header_idx = Some(i);
+            }
+            continue;
+        }
+
+        if current_section == "settings"
+            && let Some((k, _)) = trimmed.split_once('=')
+            && k.trim() == "theme"
+        {
+            theme_line_idx = Some(i);
+            break;
+        }
+    }
+
+    if let Some(idx) = theme_line_idx {
+        lines[idx] = format!("theme = \"{theme_name}\"");
+    } else if let Some(hdr_idx) = settings_header_idx {
+        lines.insert(hdr_idx + 1, format!("theme = \"{theme_name}\""));
+    } else {
+        if !lines.is_empty() && !lines.last().is_none_or(|l| l.trim().is_empty()) {
+            lines.push(String::new());
+        }
+        lines.push("[settings]".to_owned());
+        lines.push(format!("theme = \"{theme_name}\""));
+    }
+
+    let mut result = lines.join(ending);
+    result.push_str(ending);
+    result
+}
+
+/// Saves the chosen theme to a specific configuration file path.
+pub fn save_theme_to(path: &Path, theme_name: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let current_text = std::fs::read_to_string(path).unwrap_or_default();
+    let updated_text = update_theme_in_text(&current_text, theme_name);
+    std::fs::write(path, updated_text)
+}
+
+/// Saves the chosen theme to the user's config file (`zeno.toml`), creating
+/// the parent directory and file if needed.
+pub fn save_theme(theme_name: &str) -> std::io::Result<()> {
+    let path = config_path().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not determine config directory",
+        )
+    })?;
+    save_theme_to(&path, theme_name)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -382,6 +460,81 @@ word_wrap = maybe
         if let Some(path) = config_path() {
             assert!(path.ends_with("zeno/zeno.toml"), "{}", path.display());
         }
+    }
+
+    #[test]
+    fn update_theme_in_empty_config() {
+        let updated = update_theme_in_text("", "Monokai");
+        let parsed = parse(&updated);
+        assert_eq!(parsed.theme.as_deref(), Some("Monokai"));
+    }
+
+    #[test]
+    fn update_theme_replaces_existing_theme_and_keeps_other_settings() {
+        let original = r#"# user configuration
+[settings]
+line_numbers = true
+theme = "base16-ocean.dark" # old theme
+tab_width = 2
+"#;
+        let updated = update_theme_in_text(original, "Solarized (light)");
+        assert!(updated.contains("theme = \"Solarized (light)\""));
+        assert!(!updated.contains("base16-ocean.dark"));
+        assert!(updated.contains("# user configuration"));
+        assert!(updated.contains("line_numbers = true"));
+        assert!(updated.contains("tab_width = 2"));
+
+        let config = parse_config(&updated);
+        assert_eq!(config.settings.theme.as_deref(), Some("Solarized (light)"));
+        assert_eq!(config.settings.tab_width, 2);
+        assert!(config.settings.line_numbers);
+    }
+
+    #[test]
+    fn update_theme_inserts_into_settings_section_if_missing() {
+        let original = r#"[settings]
+tab_width = 8
+"#;
+        let updated = update_theme_in_text(original, "Monokai");
+        assert!(updated.contains("theme = \"Monokai\""));
+        assert!(updated.contains("tab_width = 8"));
+
+        let config = parse_config(&updated);
+        assert_eq!(config.settings.theme.as_deref(), Some("Monokai"));
+        assert_eq!(config.settings.tab_width, 8);
+    }
+
+    #[test]
+    fn update_theme_appends_settings_section_if_none_existed() {
+        let original = r#"[keys]
+leader = "ctrl+space"
+"#;
+        let updated = update_theme_in_text(original, "High Contrast");
+        assert!(updated.contains("[settings]"));
+        assert!(updated.contains("theme = \"High Contrast\""));
+        assert!(updated.contains("leader = \"ctrl+space\""));
+
+        let config = parse_config(&updated);
+        assert_eq!(config.settings.theme.as_deref(), Some("High Contrast"));
+        assert_eq!(config.keys.leader.as_deref(), Some("ctrl+space"));
+    }
+
+    #[test]
+    fn save_theme_to_writes_and_roundtrips() {
+        let dir = std::env::temp_dir().join("zeno-config-test");
+        let path = dir.join("zeno.toml");
+        let _ = std::fs::remove_file(&path);
+
+        save_theme_to(&path, "Solarized (dark)").expect("write theme to succeed");
+        let config = from_file(&path);
+        assert_eq!(config.settings.theme.as_deref(), Some("Solarized (dark)"));
+
+        // Update it again to Monokai
+        save_theme_to(&path, "Monokai").expect("update theme to succeed");
+        let config2 = from_file(&path);
+        assert_eq!(config2.settings.theme.as_deref(), Some("Monokai"));
+
+        let _ = std::fs::remove_file(&path);
     }
 
     impl Settings {

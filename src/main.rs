@@ -22,7 +22,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
 
 use zeno_cli::clipboard;
-use zeno_cli::config::Config;
+use zeno_cli::config::{self, Config};
 use zeno_cli::doc::edit::Pos;
 use zeno_cli::doc::{Doc, Snapshot, identity_of};
 use zeno_cli::finder::{self, FileFinder};
@@ -1390,9 +1390,10 @@ impl Editor {
         self.message.clear();
     }
 
-    /// Applies the chosen theme to the highlighter live.
+    /// Applies the chosen theme to the highlighter live and persists it to configuration.
     fn apply_theme(&mut self, theme_id: &str) {
         self.highlight = Highlighter::start_with_theme(&self.path, Some(theme_id.to_string()));
+        let _ = config::save_theme(theme_id);
         self.message = format!("theme: {theme_id}");
     }
 
@@ -5220,6 +5221,35 @@ mod tests {
         assert_eq!(e.highlight.theme_colors(), ThemeColors::SOLARIZED_LIGHT);
         assert_eq!(e.highlight.theme_colors().bg, Color::Rgb(253, 246, 227));
         assert_eq!(e.highlight.theme_colors().fg, Color::Rgb(101, 123, 131));
+    }
+
+    #[test]
+    fn theme_picker_persists_theme_to_config_file() {
+        let temp_config =
+            std::env::temp_dir().join(format!("zeno-theme-persist-{}.toml", std::process::id()));
+        let _ = std::fs::remove_file(&temp_config);
+        unsafe {
+            std::env::set_var("ZENO_CONFIG_PATH", &temp_config);
+        }
+
+        let (mut e, _p) = editor_with("theme-persist.txt", b"fn test() {}\n");
+        e.open_theme_picker();
+        type_into_prompt(&mut e, "mono");
+        e.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(e.highlight.theme(), Some("Monokai"));
+        let loaded = config::from_file(&temp_config);
+        assert_eq!(loaded.settings.theme.as_deref(), Some("Monokai"));
+
+        let mut fresh = Editor::new(Doc::empty().unwrap(), PathBuf::from("new.txt"));
+        fresh.apply_settings(&loaded);
+        assert_eq!(fresh.highlight.theme(), Some("Monokai"));
+        assert_eq!(fresh.highlight.theme_colors(), ThemeColors::MONOKAI);
+
+        unsafe {
+            std::env::remove_var("ZENO_CONFIG_PATH");
+        }
+        let _ = std::fs::remove_file(&temp_config);
     }
 
     #[test]
