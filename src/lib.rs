@@ -8,6 +8,7 @@
 pub mod clipboard;
 pub mod config;
 pub mod doc;
+pub mod finder;
 pub mod highlight;
 pub mod indent;
 pub mod keys;

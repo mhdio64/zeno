@@ -41,6 +41,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::SaveAs,
     },
     Entry {
+        keys: "ctrl+o / leader o",
+        label: "Open file",
+        command: Command::OpenFile,
+    },
+    Entry {
         keys: "ctrl+z / leader u",
         label: "Undo",
         command: Command::Undo,

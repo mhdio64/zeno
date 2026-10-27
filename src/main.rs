@@ -25,6 +25,7 @@ use zeno_cli::clipboard;
 use zeno_cli::config::Config;
 use zeno_cli::doc::edit::Pos;
 use zeno_cli::doc::{Doc, Snapshot, identity_of};
+use zeno_cli::finder::{self, FileFinder};
 use zeno_cli::highlight::Highlighter;
 use zeno_cli::indent::{self, IndentStyle};
 use zeno_cli::keys::Keymap;
@@ -563,6 +564,8 @@ enum Overlay {
     Help { offset: usize },
     /// The command palette, with its query.
     Palette(Palette),
+    /// The file finder, with its query.
+    Finder(FileFinder),
 }
 
 impl Editor {
@@ -830,6 +833,10 @@ impl Editor {
                 }
                 Some('p') => {
                     self.open_palette();
+                    return;
+                }
+                Some('o') => {
+                    self.open_finder();
                     return;
                 }
                 Some('z') => {
@@ -1352,6 +1359,7 @@ impl Editor {
             Command::MoveLineDown => self.move_line_down(),
             Command::Help => self.open_help(),
             Command::Palette => self.open_palette(),
+            Command::OpenFile => self.open_finder(),
         }
     }
 
@@ -1364,6 +1372,14 @@ impl Editor {
     /// `F1` and `Leader p`: every command, filtered by what is typed.
     fn open_palette(&mut self) {
         self.overlay = Some(Overlay::Palette(Palette::new()));
+        self.message.clear();
+    }
+
+    /// `Ctrl+O`, `Leader o` and Palette "Open file": scans the project and opens the file finder.
+    fn open_finder(&mut self) {
+        let root = self.project_root();
+        let finder = FileFinder::scan(&root);
+        self.overlay = Some(Overlay::Finder(finder));
         self.message.clear();
     }
 
@@ -1413,6 +1429,23 @@ impl Editor {
                 KeyCode::Up => palette.up(),
                 KeyCode::Backspace => palette.backspace(),
                 KeyCode::Char(c) if !ctrl => palette.insert(c),
+                _ => {}
+            },
+            Overlay::Finder(finder) => match key.code {
+                KeyCode::Enter => {
+                    let chosen = finder.selected_path().map(Path::to_path_buf);
+                    self.overlay = None;
+                    if let Some(target) = chosen {
+                        self.switch_to_file(&target);
+                    }
+                    return;
+                }
+                KeyCode::Down => finder.down(),
+                KeyCode::Up => finder.up(),
+                KeyCode::PageDown => finder.page_down(height),
+                KeyCode::PageUp => finder.page_up(height),
+                KeyCode::Backspace => finder.backspace(),
+                KeyCode::Char(c) if !ctrl => finder.insert(c),
                 _ => {}
             },
         }
@@ -2820,6 +2853,57 @@ impl Editor {
         }
     }
 
+    /// Root directory of the project, looking upwards for a `.git` or `Cargo.toml`.
+    fn project_root(&self) -> PathBuf {
+        let start = if self.path.as_os_str().is_empty() || self.has_no_name() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else if let Some(parent) = self.path.parent() {
+            if parent.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+            } else {
+                parent.to_path_buf()
+            }
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+
+        let mut check = start.clone();
+        loop {
+            if check.join(".git").exists() || check.join("Cargo.toml").exists() {
+                return check;
+            }
+            if !check.pop() {
+                break;
+            }
+        }
+        start
+    }
+
+    /// Switches the editor to open and edit `target`.
+    fn switch_to_file(&mut self, target: &Path) {
+        if self.dirty {
+            self.message = "unsaved changes — Ctrl+S saves, Leader Q discards".into();
+            return;
+        }
+        match Doc::open(target) {
+            Ok(doc) => {
+                let _ = doc.spawn_indexer();
+                self.doc = doc;
+                self.path = target.to_path_buf();
+                self.view = ViewState::default();
+                self.dirty = false;
+                self.highlight = Highlighter::start_with_theme(
+                    &self.path,
+                    self.highlight.theme().map(str::to_owned),
+                );
+                self.message = format!("opened {}", self.path.display());
+            }
+            Err(e) => {
+                self.message = format!("open failed: {e}");
+            }
+        }
+    }
+
     fn write_to_disk(&self) -> Result<(), String> {
         self.write_to_path(&self.path)
     }
@@ -2911,6 +2995,9 @@ impl Editor {
                         }
                         Overlay::Palette(palette) => {
                             panel::palette_lines(palette, body.height as usize)
+                        }
+                        Overlay::Finder(finder) => {
+                            finder::finder_lines(finder, body.height as usize)
                         }
                     };
                     f.render_widget(Paragraph::new(Text::from(lines)), body);
@@ -4963,6 +5050,82 @@ mod tests {
             }
             _ => panic!("the palette is open"),
         }
+    }
+
+    #[test]
+    fn ctrl_o_and_leader_o_open_file_finder() {
+        let (mut e, _p) = editor_with("finder-open.txt", b"hello\n");
+        e.handle_key(chord(KeyCode::Char('o')));
+        assert!(matches!(e.overlay, Some(Overlay::Finder(_))));
+        e.handle_key(key(KeyCode::Esc));
+        assert!(e.overlay.is_none());
+
+        sequence(&mut e, "o");
+        assert!(matches!(e.overlay, Some(Overlay::Finder(_))));
+    }
+
+    #[test]
+    fn file_finder_opens_file_and_updates_editor() {
+        let dir = std::env::temp_dir().join("zeno-finder-main-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("file1.txt");
+        let p2 = dir.join("file2.txt");
+        std::fs::write(&p1, b"first file\n").unwrap();
+        std::fs::write(&p2, b"second file\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        assert_eq!(line(&e, 0), "first file");
+
+        // Manually open finder with specific entries so test is deterministic
+        e.overlay = Some(Overlay::Finder(FileFinder::new(vec![
+            zeno_cli::finder::FileEntry {
+                display: "file2.txt".into(),
+                path: p2.clone(),
+            },
+        ])));
+
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p2);
+        assert_eq!(line(&e, 0), "second file");
+        assert!(!e.dirty);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_finder_refuses_when_dirty() {
+        let dir = std::env::temp_dir().join("zeno-finder-dirty-tests");
+        std::fs::create_dir_all(&dir).unwrap();
+        let p1 = dir.join("dirty1.txt");
+        let p2 = dir.join("dirty2.txt");
+        std::fs::write(&p1, b"first\n").unwrap();
+        std::fs::write(&p2, b"second\n").unwrap();
+
+        let doc = Doc::open(&p1).unwrap();
+        let mut e = Editor::new(doc, p1.clone());
+        e.insert_char('X');
+        assert!(e.dirty);
+
+        e.overlay = Some(Overlay::Finder(FileFinder::new(vec![
+            zeno_cli::finder::FileEntry {
+                display: "dirty2.txt".into(),
+                path: p2.clone(),
+            },
+        ])));
+
+        e.handle_key(key(KeyCode::Enter));
+        assert!(e.overlay.is_none());
+        assert_eq!(e.path, p1, "path must not change when dirty");
+        assert!(e.dirty);
+        assert!(
+            e.message.contains("unsaved changes"),
+            "warning message must be set: {}",
+            e.message
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

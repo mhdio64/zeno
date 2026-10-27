@@ -14,6 +14,7 @@ use crate::motion::{Motion, Object};
 pub enum Command {
     Save,
     SaveAs,
+    OpenFile,
     Quit,
     ForceQuit,
     Undo,
@@ -51,6 +52,7 @@ impl Command {
         match self {
             Command::Save => "save",
             Command::SaveAs => "save_as",
+            Command::OpenFile => "open_file",
             Command::Quit => "quit",
             Command::ForceQuit => "force_quit",
             Command::Undo => "undo",
@@ -88,6 +90,7 @@ impl Command {
         Some(match normalised.as_str() {
             "save" => Command::Save,
             "save_as" | "saveas" => Command::SaveAs,
+            "open_file" | "open" | "file_finder" => Command::OpenFile,
             "quit" => Command::Quit,
             "force_quit" | "quit_without_saving" => Command::ForceQuit,
             "undo" => Command::Undo,
@@ -279,6 +282,7 @@ impl Sequences {
         let command = match key {
             's' => Some(Command::Save),
             'S' => Some(Command::SaveAs),
+            'o' => Some(Command::OpenFile),
             'q' => Some(Command::Quit),
             'Q' => Some(Command::ForceQuit),
             'u' => Some(Command::Undo),
@@ -504,6 +508,7 @@ mod tests {
         for command in [
             Command::Save,
             Command::SaveAs,
+            Command::OpenFile,
             Command::Quit,
             Command::ForceQuit,
             Command::Undo,
@@ -537,6 +542,7 @@ mod tests {
     fn a_standalone_mnemonic_is_a_command() {
         assert_eq!(run("s"), Step::Action(Action::Command(Command::Save)));
         assert_eq!(run("S"), Step::Action(Action::Command(Command::SaveAs)));
+        assert_eq!(run("o"), Step::Action(Action::Command(Command::OpenFile)));
         assert_eq!(
             run(","),
             Step::Action(Action::Command(Command::ToggleGutter))
