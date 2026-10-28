@@ -336,8 +336,8 @@ fn presentation_form(c: char, form: Form) -> char {
         '\u{06A9}' => match form {
             Form::Isolated => '\u{FB8E}',
             Form::Final => '\u{FB8F}',
-            Form::Initial => '\u{FB90}',
-            Form::Medial => '\u{FB91}',
+            Form::Initial => '\u{FEDB}',
+            Form::Medial => '\u{FEDC}',
         }, // ک
         '\u{06AF}' => match form {
             Form::Isolated => '\u{FB92}',
@@ -348,8 +348,8 @@ fn presentation_form(c: char, form: Form) -> char {
         '\u{06CC}' => match form {
             Form::Isolated => '\u{FBFC}',
             Form::Final => '\u{FBFD}',
-            Form::Initial => '\u{FBFE}',
-            Form::Medial => '\u{FBFF}',
+            Form::Initial => '\u{FEF3}',
+            Form::Medial => '\u{FEF4}',
         }, // ی
         '\u{06C1}' => match form {
             Form::Isolated => '\u{FBA6}',
@@ -777,5 +777,14 @@ mod tests {
         let visual_str: String = line.chars.iter().collect();
         assert_eq!(visual_str, text);
         assert_eq!(line.log_to_vis, (0..text.len()).collect::<Vec<usize>>());
+    }
+
+    #[test]
+    fn mixed_persian_and_english_sentence_layout() {
+        let text = "راهنمای direnv برای لینوکس و ویندوز";
+        let line = layout_line(text);
+        assert_eq!(line.chars.len(), text.chars().count());
+        let visual_str: String = line.chars.iter().collect();
+        assert!(visual_str.contains("direnv"));
     }
 }
