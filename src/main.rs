@@ -715,7 +715,24 @@ impl Editor {
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
                     self.last_key = std::time::Instant::now();
-                    self.handle_key(key);
+                    if event::poll(Duration::from_millis(0)).unwrap_or(false) {
+                        let mut burst = vec![key];
+                        while event::poll(Duration::from_millis(1)).unwrap_or(false) {
+                            if let Ok(Event::Key(next_key)) = event::read() {
+                                if matches!(
+                                    next_key.kind,
+                                    KeyEventKind::Press | KeyEventKind::Repeat
+                                ) {
+                                    burst.push(next_key);
+                                }
+                            } else {
+                                break;
+                            }
+                        }
+                        self.handle_key_burst(burst);
+                    } else {
+                        self.handle_key(key);
+                    }
                 }
                 Event::Paste(text) => {
                     self.last_key = std::time::Instant::now();
@@ -2137,6 +2154,49 @@ impl Editor {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         self.clipboard = normalized.clone();
         self.insert_replacing_selection(&normalized);
+    }
+
+    /// Handles a rapid burst of key events from a terminal paste.
+    ///
+    /// If all keys in the burst are text characters, newlines, or tabs,
+    /// they are treated as pasted text, avoiding cascading auto-indent.
+    fn handle_key_burst(&mut self, burst: Vec<KeyEvent>) {
+        if burst.is_empty() {
+            return;
+        }
+        if burst.len() == 1 {
+            self.handle_key(burst[0]);
+            return;
+        }
+
+        let mut text = String::with_capacity(burst.len());
+        let mut all_text = true;
+
+        for key in &burst {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                || key.modifiers.contains(KeyModifiers::ALT)
+            {
+                all_text = false;
+                break;
+            }
+            match key.code {
+                KeyCode::Char('\r' | '\n') | KeyCode::Enter => text.push('\n'),
+                KeyCode::Char(c) => text.push(c),
+                KeyCode::Tab => text.push('\t'),
+                _ => {
+                    all_text = false;
+                    break;
+                }
+            }
+        }
+
+        if all_text {
+            self.handle_paste(&text);
+        } else {
+            for key in burst {
+                self.handle_key(key);
+            }
+        }
     }
 
     // ----- selection -----------------------------------------------------
@@ -6363,5 +6423,24 @@ trim_trailing_whitespace = true
         e.handle_paste("my_query\r\n");
 
         assert_eq!(e.prompt.as_ref().unwrap().text(), "my_query");
+    }
+
+    #[test]
+    fn key_burst_preserves_indentation_without_cascading() {
+        let (mut e, _p) = editor_with("burst-test.py", b"");
+        let mut burst = Vec::new();
+        let snippet = "while babies < 100:\n    print (babies)\n    parents = 1\n";
+        for c in snippet.chars() {
+            if c == '\n' {
+                burst.push(key(KeyCode::Enter));
+            } else {
+                burst.push(key(KeyCode::Char(c)));
+            }
+        }
+        e.handle_key_burst(burst);
+
+        assert_eq!(line(&e, 0), "while babies < 100:");
+        assert_eq!(line(&e, 1), "    print (babies)");
+        assert_eq!(line(&e, 2), "    parents = 1");
     }
 }
