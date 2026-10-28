@@ -850,6 +850,22 @@ impl Editor {
                 self.move_line_down();
                 return;
             }
+            if let KeyCode::Char(']' | '}') = key.code {
+                self.next_git_change();
+                return;
+            }
+            if let KeyCode::Char('[' | '{') = key.code {
+                self.previous_git_change();
+                return;
+            }
+            if let KeyCode::F(3) = key.code {
+                if shift {
+                    self.previous_git_change();
+                } else {
+                    self.next_git_change();
+                }
+                return;
+            }
         }
         if ctrl {
             // `Ctrl+/` arrives as `/` from a console key, and as the control
@@ -1565,6 +1581,8 @@ impl Editor {
                 self.git.refresh();
                 self.message = "refreshed git signs".into();
             }
+            Command::NextGitChange => self.next_git_change(),
+            Command::PreviousGitChange => self.previous_git_change(),
         }
     }
 
@@ -3148,6 +3166,66 @@ impl Editor {
         }
         let scope = Scope::Before { pos: self.cursor() };
         self.start_scan(scope, Some(Wrap::End));
+    }
+
+    /// Jumps to the start of the next git change hunk (`Alt+]`).
+    fn next_git_change(&mut self) {
+        self.git.update(&self.doc);
+        let current_line = self.view.cursor_line as usize;
+        let Some((hunk_idx, wrapped)) = self.git.next_hunk_index(current_line) else {
+            self.message = "no git changes".into();
+            return;
+        };
+        let starts = self.git.hunk_starts();
+        let target_line = starts[hunk_idx];
+        let total = starts.len();
+
+        if total == 1 && current_line == target_line {
+            self.message = "already at only git change".into();
+            return;
+        }
+
+        self.view.cursor_line = target_line as u64;
+        self.view.cursor_col = 0;
+        self.clear_selection();
+        self.clamp_column();
+        self.ensure_cursor_visible();
+
+        if wrapped {
+            self.message = format!("git change {} of {} (wrapped)", hunk_idx + 1, total);
+        } else {
+            self.message = format!("git change {} of {}", hunk_idx + 1, total);
+        }
+    }
+
+    /// Jumps to the start of the previous git change hunk (`Alt+[`).
+    fn previous_git_change(&mut self) {
+        self.git.update(&self.doc);
+        let current_line = self.view.cursor_line as usize;
+        let Some((hunk_idx, wrapped)) = self.git.previous_hunk_index(current_line) else {
+            self.message = "no git changes".into();
+            return;
+        };
+        let starts = self.git.hunk_starts();
+        let target_line = starts[hunk_idx];
+        let total = starts.len();
+
+        if total == 1 && current_line == target_line {
+            self.message = "already at only git change".into();
+            return;
+        }
+
+        self.view.cursor_line = target_line as u64;
+        self.view.cursor_col = 0;
+        self.clear_selection();
+        self.clamp_column();
+        self.ensure_cursor_visible();
+
+        if wrapped {
+            self.message = format!("git change {} of {} (wrapped)", hunk_idx + 1, total);
+        } else {
+            self.message = format!("git change {} of {}", hunk_idx + 1, total);
+        }
     }
 
     /// `Enter` while inside a `Search` prompt: jump to the next match and
@@ -6601,5 +6679,69 @@ trim_trailing_whitespace = true
         e.doc.index_fully();
         e.git.update(&e.doc);
         assert!(e.git.signs.is_empty(), "undo back to baseline clears signs");
+    }
+
+    #[test]
+    fn next_and_previous_git_change_navigates_hunks() {
+        let (mut e, _p) = editor_with(
+            "git-nav.txt",
+            b"line 0\nline 1\nline 2\nline 3\nline 4\nline 5\nline 6\nline 7\n",
+        );
+        // Initially no git changes
+        e.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert_eq!(e.message, "no git changes");
+        assert_eq!(e.view.cursor_line, 0);
+
+        // Populate two change hunks: Hunk 0 at line 2..=3, Hunk 1 at line 6
+        e.git.signs.insert(2, zeno_cli::git::DiffSign::Modified);
+        e.git.signs.insert(3, zeno_cli::git::DiffSign::Added);
+        e.git.signs.insert(6, zeno_cli::git::DiffSign::Modified);
+        e.git.signs_version = e.doc.version();
+
+        // From line 0, next jumps to line 2 (Hunk 0)
+        e.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.message, "git change 1 of 2");
+
+        // Next jumps to line 6 (Hunk 1)
+        e.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert_eq!(e.view.cursor_line, 6);
+        assert_eq!(e.message, "git change 2 of 2");
+
+        // Next wraps around to line 2 (Hunk 0)
+        e.handle_key(KeyEvent::new(KeyCode::Char(']'), KeyModifiers::ALT));
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.message, "git change 1 of 2 (wrapped)");
+
+        // Previous wraps to line 6 (Hunk 1)
+        e.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT));
+        assert_eq!(e.view.cursor_line, 6);
+        assert_eq!(e.message, "git change 2 of 2 (wrapped)");
+
+        // Previous jumps back to line 2 (Hunk 0)
+        e.handle_key(KeyEvent::new(KeyCode::Char('['), KeyModifiers::ALT));
+        assert_eq!(e.view.cursor_line, 2);
+        assert_eq!(e.message, "git change 1 of 2");
+    }
+
+    #[test]
+    fn next_and_previous_git_change_commands_from_palette() {
+        let (mut e, _p) = editor_with("git-cmd.txt", b"a\nb\nc\nd\n");
+        e.git.signs.insert(3, zeno_cli::git::DiffSign::Added);
+        e.git.signs_version = e.doc.version();
+
+        e.command(Command::NextGitChange);
+        assert_eq!(e.view.cursor_line, 3);
+        assert_eq!(e.message, "git change 1 of 1");
+
+        // Calling next on the only hunk
+        e.command(Command::NextGitChange);
+        assert_eq!(e.view.cursor_line, 3);
+        assert_eq!(e.message, "already at only git change");
+
+        // Previous on the only hunk
+        e.command(Command::PreviousGitChange);
+        assert_eq!(e.view.cursor_line, 3);
+        assert_eq!(e.message, "already at only git change");
     }
 }

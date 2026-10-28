@@ -56,6 +56,10 @@ pub enum Command {
     ToggleGitDiff,
     /// Refreshes git diff gutter signs from git HEAD.
     RefreshGitDiff,
+    /// Jumps to the next git change hunk (`Alt+]`).
+    NextGitChange,
+    /// Jumps to the previous git change hunk (`Alt+[`).
+    PreviousGitChange,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -96,6 +100,8 @@ impl Command {
             Command::DeleteToEndOfLine => "delete_to_end_of_line",
             Command::ToggleGitDiff => "toggle_git_diff",
             Command::RefreshGitDiff => "refresh_git_diff",
+            Command::NextGitChange => "next_git_change",
+            Command::PreviousGitChange => "previous_git_change",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -150,6 +156,12 @@ impl Command {
             "delete_to_end_of_line" | "delete_to_eol" | "kill_to_end" => Command::DeleteToEndOfLine,
             "toggle_git_diff" | "toggle_git_gutter" | "git_diff" => Command::ToggleGitDiff,
             "refresh_git_diff" | "refresh_git" | "git_refresh" => Command::RefreshGitDiff,
+            "next_git_change" | "next_change" | "next_hunk" => Command::NextGitChange,
+            "previous_git_change"
+            | "prev_git_change"
+            | "prev_change"
+            | "previous_hunk"
+            | "prev_hunk" => Command::PreviousGitChange,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -579,6 +591,8 @@ mod tests {
             Command::DeleteToEndOfLine,
             Command::ToggleGitDiff,
             Command::RefreshGitDiff,
+            Command::NextGitChange,
+            Command::PreviousGitChange,
             Command::Help,
             Command::Palette,
         ] {

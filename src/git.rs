@@ -159,6 +159,78 @@ impl GitState {
             self.signs_version = doc_ver;
         }
     }
+
+    /// Returns the sorted start line numbers of all contiguous change hunks.
+    pub fn hunk_starts(&self) -> Vec<usize> {
+        if self.signs.is_empty() {
+            return Vec::new();
+        }
+        let mut lines: Vec<usize> = self.signs.keys().copied().collect();
+        lines.sort_unstable();
+
+        let mut starts = Vec::new();
+        let mut prev = None;
+        for line in lines {
+            if let Some(p) = prev {
+                if line > p + 1 {
+                    starts.push(line);
+                }
+            } else {
+                starts.push(line);
+            }
+            prev = Some(line);
+        }
+        starts
+    }
+
+    /// Finds the target hunk index for moving forward from `current_line`.
+    /// Returns `Some((hunk_index, is_wrapped))` or `None` if no changes exist.
+    pub fn next_hunk_index(&self, current_line: usize) -> Option<(usize, bool)> {
+        let starts = self.hunk_starts();
+        if starts.is_empty() {
+            return None;
+        }
+        if starts.len() == 1 && self.is_in_hunk(current_line, starts[0]) {
+            return Some((0, false));
+        }
+        for (i, &start) in starts.iter().enumerate() {
+            if start > current_line {
+                return Some((i, false));
+            }
+        }
+        Some((0, true))
+    }
+
+    /// Finds the target hunk index for moving backward from `current_line`.
+    /// Returns `Some((hunk_index, is_wrapped))` or `None` if no changes exist.
+    pub fn previous_hunk_index(&self, current_line: usize) -> Option<(usize, bool)> {
+        let starts = self.hunk_starts();
+        if starts.is_empty() {
+            return None;
+        }
+        if starts.len() == 1 && self.is_in_hunk(current_line, starts[0]) {
+            return Some((0, false));
+        }
+        for (i, &start) in starts.iter().enumerate().rev() {
+            if start < current_line {
+                return Some((i, false));
+            }
+        }
+        Some((starts.len() - 1, true))
+    }
+
+    /// Returns true if `line` is part of the contiguous hunk starting at `hunk_start`.
+    pub fn is_in_hunk(&self, line: usize, hunk_start: usize) -> bool {
+        if line < hunk_start {
+            return false;
+        }
+        for curr in hunk_start..=line {
+            if !self.signs.contains_key(&curr) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 /// Finds the root directory of the git repository containing `path`.
@@ -572,5 +644,58 @@ mod tests {
         let root = find_repo_root(current_file);
         assert!(root.is_some());
         assert!(root.unwrap().join(".git").exists());
+    }
+
+    #[test]
+    fn hunk_navigation_logic() {
+        let mut state = GitState {
+            repo_root: None,
+            rel_path: None,
+            base_lines: None,
+            base_rx: None,
+            signs: HashMap::new(),
+            signs_version: 0,
+        };
+
+        // Initially empty
+        assert_eq!(state.hunk_starts(), Vec::<usize>::new());
+        assert_eq!(state.next_hunk_index(0), None);
+        assert_eq!(state.previous_hunk_index(0), None);
+
+        // Hunk 0: lines 10, 11, 12
+        state.signs.insert(10, DiffSign::Modified);
+        state.signs.insert(11, DiffSign::Added);
+        state.signs.insert(12, DiffSign::Added);
+        // Hunk 1: line 25
+        state.signs.insert(25, DiffSign::Deleted);
+        // Hunk 2: lines 40, 41
+        state.signs.insert(40, DiffSign::Added);
+        state.signs.insert(41, DiffSign::Added);
+
+        assert_eq!(state.hunk_starts(), vec![10, 25, 40]);
+
+        // Forward from line 0 -> Hunk 0 (10)
+        assert_eq!(state.next_hunk_index(0), Some((0, false)));
+        // Forward from line 10 -> Hunk 1 (25)
+        assert_eq!(state.next_hunk_index(10), Some((1, false)));
+        // Forward from line 11 (inside Hunk 0) -> Hunk 1 (25)
+        assert_eq!(state.next_hunk_index(11), Some((1, false)));
+        // Forward from line 25 -> Hunk 2 (40)
+        assert_eq!(state.next_hunk_index(25), Some((2, false)));
+        // Forward from line 40 -> wraps to Hunk 0 (10)
+        assert_eq!(state.next_hunk_index(40), Some((0, true)));
+        // Forward from line 50 -> wraps to Hunk 0 (10)
+        assert_eq!(state.next_hunk_index(50), Some((0, true)));
+
+        // Backward from line 50 -> Hunk 2 (40)
+        assert_eq!(state.previous_hunk_index(50), Some((2, false)));
+        // Backward from line 40 -> Hunk 1 (25)
+        assert_eq!(state.previous_hunk_index(40), Some((1, false)));
+        // Backward from line 25 -> Hunk 0 (10)
+        assert_eq!(state.previous_hunk_index(25), Some((0, false)));
+        // Backward from line 12 (inside Hunk 0) -> start of Hunk 0 (10)
+        assert_eq!(state.previous_hunk_index(12), Some((0, false)));
+        // Backward from line 10 -> wraps to Hunk 2 (40)
+        assert_eq!(state.previous_hunk_index(10), Some((2, true)));
     }
 }

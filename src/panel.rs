@@ -151,6 +151,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::RefreshGitDiff,
     },
     Entry {
+        keys: "alt+]",
+        label: "Next git change",
+        command: Command::NextGitChange,
+    },
+    Entry {
+        keys: "alt+[",
+        label: "Previous git change",
+        command: Command::PreviousGitChange,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,
