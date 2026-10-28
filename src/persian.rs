@@ -515,46 +515,51 @@ pub fn layout_chars(chars: &[char]) -> VisualLine {
         });
     }
 
-    // Determine the first strong direction in the line
-    let first_strong = tokens.iter().find_map(|t| match t.kind {
-        TokenType::Rtl => Some(TokenType::Rtl),
-        TokenType::Ltr => Some(TokenType::Ltr),
-        _ => None,
-    });
-
     let mut visual_chars = Vec::with_capacity(len);
     let mut vis_to_log = Vec::with_capacity(len);
 
-    match first_strong {
-        Some(TokenType::Rtl) => {
-            // Primarily RTL line (Persian sentence, comment, or paragraph).
-            // Leading indentation spaces/comment prefix stay on the left.
-            let first_rtl_idx = tokens
-                .iter()
-                .position(|t| t.kind == TokenType::Rtl)
-                .unwrap_or(0);
-            let mut prefix_end_token = 0;
-            while prefix_end_token < first_rtl_idx {
-                let t = &tokens[prefix_end_token];
-                if t.kind == TokenType::Space
-                    || (t.kind == TokenType::Punct && is_comment_punct(shaped[t.start]))
+    let mut t_idx = 0;
+    while t_idx < tokens.len() {
+        if tokens[t_idx].kind == TokenType::Rtl {
+            // Find the end of this RTL span
+            let span_start = t_idx;
+            let mut span_end = t_idx;
+            let mut lookahead = t_idx + 1;
+            while lookahead < tokens.len() {
+                let lk = tokens[lookahead].kind;
+                if lk == TokenType::Rtl {
+                    span_end = lookahead;
+                    lookahead += 1;
+                } else if lk == TokenType::Space || lk == TokenType::Number {
+                    // Only include space or number if immediately followed by another RTL token
+                    if lookahead + 1 < tokens.len() && tokens[lookahead + 1].kind == TokenType::Rtl
+                    {
+                        span_end = lookahead + 1;
+                        lookahead += 2;
+                    } else if lk == TokenType::Number {
+                        span_end = lookahead;
+                        lookahead += 1;
+                    } else {
+                        break;
+                    }
+                } else if lk == TokenType::Punct
+                    && is_persian_internal_punct(shaped[tokens[lookahead].start])
                 {
-                    prefix_end_token += 1;
+                    // Internal punctuation like '-' or '/' between RTL words
+                    if lookahead + 1 < tokens.len() && tokens[lookahead + 1].kind == TokenType::Rtl
+                    {
+                        span_end = lookahead + 1;
+                        lookahead += 2;
+                    } else {
+                        break;
+                    }
                 } else {
                     break;
                 }
             }
 
-            // Emit prefix in forward order
-            for t in &tokens[..prefix_end_token] {
-                for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
-                    visual_chars.push(c);
-                    vis_to_log.push(t.start + offset);
-                }
-            }
-
-            // Emit remainder of tokens in reverse order
-            for t in tokens[prefix_end_token..].iter().rev() {
+            // Reorder tokens within span [span_start..=span_end] in reverse
+            for t in tokens[span_start..=span_end].iter().rev() {
                 match t.kind {
                     TokenType::Rtl => {
                         for idx in (t.start..t.end).rev() {
@@ -569,7 +574,6 @@ pub fn layout_chars(chars: &[char]) -> VisualLine {
                         }
                     }
                     TokenType::Ltr | TokenType::Number | TokenType::Space => {
-                        // Forward order within embedded LTR words or numbers
                         for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
                             visual_chars.push(c);
                             vis_to_log.push(t.start + offset);
@@ -577,73 +581,14 @@ pub fn layout_chars(chars: &[char]) -> VisualLine {
                     }
                 }
             }
-        }
-        _ => {
-            // Primarily LTR line (Code line with embedded RTL strings/comments).
-            // We identify contiguous RTL spans and reorder them internally.
-            let mut t_idx = 0;
-            while t_idx < tokens.len() {
-                if tokens[t_idx].kind == TokenType::Rtl {
-                    // Find the end of this RTL span
-                    let span_start = t_idx;
-                    let mut span_end = t_idx;
-                    let mut lookahead = t_idx + 1;
-                    while lookahead < tokens.len() {
-                        let lk = tokens[lookahead].kind;
-                        if lk == TokenType::Rtl {
-                            span_end = lookahead;
-                            lookahead += 1;
-                        } else if matches!(
-                            lk,
-                            TokenType::Space | TokenType::Number | TokenType::Punct
-                        ) {
-                            // Only extend if followed by another RTL token in this line
-                            let has_further_rtl = tokens[lookahead + 1..]
-                                .iter()
-                                .any(|t| t.kind == TokenType::Rtl);
-                            if has_further_rtl {
-                                lookahead += 1;
-                            } else {
-                                break;
-                            }
-                        } else {
-                            break;
-                        }
-                    }
-
-                    // Reorder tokens within span [span_start..=span_end] in reverse
-                    for t in tokens[span_start..=span_end].iter().rev() {
-                        match t.kind {
-                            TokenType::Rtl => {
-                                for idx in (t.start..t.end).rev() {
-                                    visual_chars.push(shaped[idx]);
-                                    vis_to_log.push(idx);
-                                }
-                            }
-                            TokenType::Punct => {
-                                for idx in (t.start..t.end).rev() {
-                                    visual_chars.push(mirror_char(shaped[idx]));
-                                    vis_to_log.push(idx);
-                                }
-                            }
-                            TokenType::Ltr | TokenType::Number | TokenType::Space => {
-                                for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
-                                    visual_chars.push(c);
-                                    vis_to_log.push(t.start + offset);
-                                }
-                            }
-                        }
-                    }
-                    t_idx = span_end + 1;
-                } else {
-                    let t = &tokens[t_idx];
-                    for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
-                        visual_chars.push(c);
-                        vis_to_log.push(t.start + offset);
-                    }
-                    t_idx += 1;
-                }
+            t_idx = span_end + 1;
+        } else {
+            let t = &tokens[t_idx];
+            for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
+                visual_chars.push(c);
+                vis_to_log.push(t.start + offset);
             }
+            t_idx += 1;
         }
     }
 
@@ -663,8 +608,8 @@ pub fn layout_chars(chars: &[char]) -> VisualLine {
 }
 
 #[inline]
-fn is_comment_punct(c: char) -> bool {
-    matches!(c, '/' | '#' | '*' | '-' | ';')
+fn is_persian_internal_punct(c: char) -> bool {
+    matches!(c, '-' | '/' | '\\' | 'ـ' | '\u{200C}' | '\u{200D}')
 }
 
 /// Transforms a logical text string into visual characters and mappings.
@@ -786,5 +731,20 @@ mod tests {
         assert_eq!(line.chars.len(), text.chars().count());
         let visual_str: String = line.chars.iter().collect();
         assert!(visual_str.contains("direnv"));
+    }
+
+    #[test]
+    fn markdown_and_english_phrases_not_scrambled() {
+        let text1 = "**حالت تمرکز بدون شلوغی (Zen / Distraction-Free Mode)**";
+        let line1 = layout_line(text1);
+        let s1: String = line1.chars.iter().collect();
+        assert!(s1.starts_with("**"));
+        assert!(s1.contains("(Zen / Distraction-Free Mode)**"));
+
+        let text2 = "- **کاربرد**: با زدن یک کلید";
+        let line2 = layout_line(text2);
+        let s2: String = line2.chars.iter().collect();
+        assert!(s2.starts_with("- **"));
+        assert!(s2.contains("**: "));
     }
 }
