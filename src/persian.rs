@@ -440,19 +440,15 @@ pub struct VisualLine {
 }
 
 /// Transforms a logical character slice into visual characters for terminal rendering.
+///
+/// Modern terminals (such as Windows Terminal, iTerm2, WezTerm, Alacritty) with an
+/// Arabic/Persian font (like Vazirmatn Code) have native DirectWrite / HarfBuzz OpenType
+/// shaping and BiDi layout engines built-in. Passing clean, standard Unicode codepoints
+/// preserves natural reading order, cursive letter connections, and exact 1:1 cursor mapping.
 pub fn layout_chars(chars: &[char]) -> VisualLine {
     let len = chars.len();
-    if len == 0 || !has_rtl_chars(chars) {
-        return VisualLine {
-            chars: chars.to_vec(),
-            vis_to_log: (0..len).collect(),
-            log_to_vis: (0..len).collect(),
-        };
-    }
-
-    let shaped = shape_chars(chars);
     VisualLine {
-        chars: shaped,
+        chars: chars.to_vec(),
         vis_to_log: (0..len).collect(),
         log_to_vis: (0..len).collect(),
     }
@@ -529,12 +525,8 @@ mod tests {
     #[test]
     fn bidi_layout_reorders_pure_persian_sentence() {
         let line = layout_line("سلام دنیا");
-        // In visual order: 'دنیا' on left, 'سلام' on right
         let visual_str: String = line.chars.iter().collect();
-        // Rightmost characters should be the shaped letters of سلام
-        assert!(
-            visual_str.ends_with(&['\u{FEE0}', '\u{FEB3}'][..]) || visual_str.contains('\u{FEB3}')
-        );
+        assert_eq!(visual_str, "سلام دنیا");
         assert_eq!(line.chars.len(), "سلام دنیا".chars().count());
         assert_eq!(line.vis_to_log.len(), line.chars.len());
         assert_eq!(line.log_to_vis.len(), line.chars.len());
@@ -585,8 +577,8 @@ mod tests {
         let line1 = layout_line(text1);
         let s1: String = line1.chars.iter().collect();
         assert!(s1.starts_with("**"));
-        // First Persian word is shaped 'حالت' (\u{FEA3} initial heh)
-        assert_eq!(line1.chars[2], '\u{FEA3}');
+        // First Persian word is 'حالت' ('ح' \u{062D})
+        assert_eq!(line1.chars[2], 'ح');
         assert!(s1.contains("(Zen / Distraction-Free Mode)**"));
 
         let text2 = "- **کاربرد**: با زدن یک کلید";
