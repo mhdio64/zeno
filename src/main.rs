@@ -898,7 +898,11 @@ impl Editor {
                     return;
                 }
                 Some('k') => {
-                    self.delete_to_end_of_line();
+                    if alt {
+                        self.delete_to_end_of_line();
+                    } else {
+                        self.delete_current_line();
+                    }
                     return;
                 }
                 Some('e') => {
@@ -1272,7 +1276,54 @@ impl Editor {
         }
     }
 
-    /// `Ctrl+K`: delete from the caret to the end of the line.
+    /// `Ctrl+K`: delete the current line completely (nano style), pulling the lines below up.
+    fn delete_current_line(&mut self) {
+        self.doc.index_fully();
+        let total_lines = self.doc.line_count();
+        if total_lines == 0 {
+            return;
+        }
+        let line = self.view.cursor_line;
+        let last_line = total_lines.saturating_sub(1);
+
+        let (start, end) = if line < last_line {
+            // Delete from start of this line to start of next line (includes '\n')
+            (Pos::new(line, 0), Pos::new(line + 1, 0))
+        } else if line > 0 {
+            // Last line: delete from end of previous line to end of this line (includes '\n')
+            let prev_len = self.line_len(line - 1);
+            (
+                Pos::new(line - 1, prev_len),
+                Pos::new(line, self.line_len(line)),
+            )
+        } else {
+            // Only one line exists: clear its content
+            (Pos::new(0, 0), Pos::new(0, self.line_len(0)))
+        };
+
+        if start == end && self.doc.line_text(0).is_none_or(|t| t.is_empty()) {
+            self.message = "already empty".into();
+            return;
+        }
+
+        let deleted_text = self.doc.text_in_range(start, end);
+        self.osc = clipboard::osc52(&deleted_text);
+        self.clipboard = deleted_text;
+
+        self.doc.edit(start, end, "");
+        self.clear_selection();
+        self.dirty = true;
+        self.doc.index_fully();
+        let new_last = self.doc.line_count().saturating_sub(1);
+        if self.view.cursor_line > new_last {
+            self.view.cursor_line = new_last;
+        }
+        self.clamp_column();
+        self.ensure_cursor_visible();
+        self.message.clear();
+    }
+
+    /// `Ctrl+Alt+K`: delete from the caret to the end of the line.
     fn delete_to_end_of_line(&mut self) {
         let cursor = self.cursor();
         let end = motion::target(&self.doc, cursor, Motion::LineEnd);
@@ -1280,6 +1331,10 @@ impl Editor {
             self.message = "already at the end of the line".into();
             return;
         }
+        let text = self.doc.text_in_range(cursor, end);
+        self.osc = clipboard::osc52(&text);
+        self.clipboard = text;
+
         self.doc.edit(cursor, end, "");
         self.clear_selection();
         self.dirty = true;
@@ -1488,6 +1543,8 @@ impl Editor {
                     self.message = "no trailing whitespace".into();
                 }
             }
+            Command::DeleteLine => self.delete_current_line(),
+            Command::DeleteToEndOfLine => self.delete_to_end_of_line(),
         }
     }
 
@@ -4807,12 +4864,35 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_k_deletes_to_the_end_of_the_line() {
-        let (mut e, _p) = editor_with("ctrl-k.txt", b"alpha beta\nsecond\n");
+    fn ctrl_k_deletes_current_line_and_pulls_up() {
+        let (mut e, _p) = editor_with("ctrl-k.txt", b"alpha beta\nsecond\nthird\n");
         e.view.cursor_col = 5;
-        e.handle_key(chord(KeyCode::Char('\u{0b}')));
+        e.handle_key(chord(KeyCode::Char('k')));
+        assert_eq!(
+            line(&e, 0),
+            "second",
+            "line is deleted and lines below pull up"
+        );
+        assert_eq!(line(&e, 1), "third");
+        assert_eq!(e.clipboard, "alpha beta\n");
+
+        // Repeat Ctrl+K deletes the next line
+        e.handle_key(chord(KeyCode::Char('k')));
+        assert_eq!(line(&e, 0), "third");
+        assert_eq!(e.clipboard, "second\n");
+    }
+
+    #[test]
+    fn ctrl_alt_k_deletes_to_the_end_of_the_line() {
+        let (mut e, _p) = editor_with("ctrl-alt-k.txt", b"alpha beta\nsecond\n");
+        e.view.cursor_col = 5;
+        e.handle_key(KeyEvent::new(
+            KeyCode::Char('k'),
+            KeyModifiers::CONTROL | KeyModifiers::ALT,
+        ));
         assert_eq!(line(&e, 0), "alpha");
         assert_eq!(line(&e, 1), "second", "only the current line is touched");
+        assert_eq!(e.clipboard, " beta");
     }
 
     #[test]

@@ -131,6 +131,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::TrimTrailingWhitespace,
     },
     Entry {
+        keys: "ctrl+k",
+        label: "Delete line",
+        command: Command::DeleteLine,
+    },
+    Entry {
+        keys: "ctrl+alt+k",
+        label: "Delete to end of line",
+        command: Command::DeleteToEndOfLine,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

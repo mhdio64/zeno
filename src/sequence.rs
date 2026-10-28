@@ -48,6 +48,10 @@ pub enum Command {
     CompleteWord,
     /// Trims trailing whitespace from all lines.
     TrimTrailingWhitespace,
+    /// Deletes the current line entirely and pulls the next line up (`Ctrl+K`).
+    DeleteLine,
+    /// Deletes from the cursor to the end of the line (`Ctrl+Alt+K`).
+    DeleteToEndOfLine,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -84,6 +88,8 @@ impl Command {
             Command::MoveLineDown => "move_line_down",
             Command::CompleteWord => "complete_word",
             Command::TrimTrailingWhitespace => "trim_trailing_whitespace",
+            Command::DeleteLine => "delete_line",
+            Command::DeleteToEndOfLine => "delete_to_end_of_line",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -134,6 +140,8 @@ impl Command {
             "trim_trailing_whitespace" | "trim_whitespace" | "trim" => {
                 Command::TrimTrailingWhitespace
             }
+            "delete_line" | "cut_line" | "kill_line" => Command::DeleteLine,
+            "delete_to_end_of_line" | "delete_to_eol" | "kill_to_end" => Command::DeleteToEndOfLine,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -559,6 +567,8 @@ mod tests {
             Command::MoveLineDown,
             Command::CompleteWord,
             Command::TrimTrailingWhitespace,
+            Command::DeleteLine,
+            Command::DeleteToEndOfLine,
             Command::Help,
             Command::Palette,
         ] {
