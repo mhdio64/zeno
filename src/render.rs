@@ -2109,13 +2109,12 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        // The characters must be shaped into presentation forms:
+        // The characters must be shaped into presentation forms in natural forward reading order:
         // سلام shaped: [FEB3 (س initial), FEE0 (ل medial), FE8E (ا final), FEE1 (م isolated)]
-        // In visual order for RTL line: [FEE1, FE8E, FEE0, FEB3]
-        assert_eq!(buffer[(0, 0)].symbol(), "\u{FEE1}");
-        assert_eq!(buffer[(1, 0)].symbol(), "\u{FE8E}");
-        assert_eq!(buffer[(2, 0)].symbol(), "\u{FEE0}");
-        assert_eq!(buffer[(3, 0)].symbol(), "\u{FEB3}");
+        assert_eq!(buffer[(0, 0)].symbol(), "\u{FEB3}");
+        assert_eq!(buffer[(1, 0)].symbol(), "\u{FEE0}");
+        assert_eq!(buffer[(2, 0)].symbol(), "\u{FE8E}");
+        assert_eq!(buffer[(3, 0)].symbol(), "\u{FEE1}");
     }
 
     #[test]
@@ -2140,7 +2139,7 @@ mod tests {
         };
         let view = View::new(&doc, &state);
         let pos = view.cursor_position(Rect::new(0, 0, 20, 2));
-        // Logical 0 ('س') is at visual column 3 on screen
-        assert_eq!(pos, Some((3, 0)));
+        // Logical 0 ('س') is at visual column 0 on screen
+        assert_eq!(pos, Some((0, 0)));
     }
 }

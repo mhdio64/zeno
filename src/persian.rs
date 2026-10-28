@@ -439,50 +439,6 @@ pub struct VisualLine {
     pub log_to_vis: Vec<usize>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum TokenType {
-    Rtl,
-    Ltr,
-    Number,
-    Space,
-    Punct,
-}
-
-#[inline]
-fn token_type(c: char) -> TokenType {
-    match c {
-        c if is_rtl_char(c) || matches!(c, '\u{060C}' | '\u{061B}' | '\u{061F}') => TokenType::Rtl,
-        '0'..='9' | '\u{06F0}'..='\u{06F9}' | '\u{0660}'..='\u{0669}' => TokenType::Number,
-        c if c.is_alphabetic() => TokenType::Ltr,
-        c if c.is_whitespace() => TokenType::Space,
-        _ => TokenType::Punct,
-    }
-}
-
-#[inline]
-fn mirror_char(c: char) -> char {
-    match c {
-        '(' => ')',
-        ')' => '(',
-        '[' => ']',
-        ']' => '[',
-        '{' => '}',
-        '}' => '{',
-        '<' => '>',
-        '>' => '<',
-        '«' => '»',
-        '»' => '«',
-        other => other,
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Token {
-    kind: TokenType,
-    start: usize,
-    end: usize,
-}
-
 /// Transforms a logical character slice into visual characters for terminal rendering.
 pub fn layout_chars(chars: &[char]) -> VisualLine {
     let len = chars.len();
@@ -495,121 +451,11 @@ pub fn layout_chars(chars: &[char]) -> VisualLine {
     }
 
     let shaped = shape_chars(chars);
-
-    // Group adjacent characters of similar kind into tokens
-    let mut tokens: Vec<Token> = Vec::new();
-    let mut i = 0;
-    while i < len {
-        let kind = token_type(shaped[i]);
-        let start = i;
-        i += 1;
-        if kind != TokenType::Punct {
-            while i < len && token_type(shaped[i]) == kind {
-                i += 1;
-            }
-        }
-        tokens.push(Token {
-            kind,
-            start,
-            end: i,
-        });
-    }
-
-    let mut visual_chars = Vec::with_capacity(len);
-    let mut vis_to_log = Vec::with_capacity(len);
-
-    let mut t_idx = 0;
-    while t_idx < tokens.len() {
-        if tokens[t_idx].kind == TokenType::Rtl {
-            // Find the end of this RTL span
-            let span_start = t_idx;
-            let mut span_end = t_idx;
-            let mut lookahead = t_idx + 1;
-            while lookahead < tokens.len() {
-                let lk = tokens[lookahead].kind;
-                if lk == TokenType::Rtl {
-                    span_end = lookahead;
-                    lookahead += 1;
-                } else if lk == TokenType::Space || lk == TokenType::Number {
-                    // Only include space or number if immediately followed by another RTL token
-                    if lookahead + 1 < tokens.len() && tokens[lookahead + 1].kind == TokenType::Rtl
-                    {
-                        span_end = lookahead + 1;
-                        lookahead += 2;
-                    } else if lk == TokenType::Number {
-                        span_end = lookahead;
-                        lookahead += 1;
-                    } else {
-                        break;
-                    }
-                } else if lk == TokenType::Punct
-                    && is_persian_internal_punct(shaped[tokens[lookahead].start])
-                {
-                    // Internal punctuation like '-' or '/' between RTL words
-                    if lookahead + 1 < tokens.len() && tokens[lookahead + 1].kind == TokenType::Rtl
-                    {
-                        span_end = lookahead + 1;
-                        lookahead += 2;
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // Reorder tokens within span [span_start..=span_end] in reverse
-            for t in tokens[span_start..=span_end].iter().rev() {
-                match t.kind {
-                    TokenType::Rtl => {
-                        for idx in (t.start..t.end).rev() {
-                            visual_chars.push(shaped[idx]);
-                            vis_to_log.push(idx);
-                        }
-                    }
-                    TokenType::Punct => {
-                        for idx in (t.start..t.end).rev() {
-                            visual_chars.push(mirror_char(shaped[idx]));
-                            vis_to_log.push(idx);
-                        }
-                    }
-                    TokenType::Ltr | TokenType::Number | TokenType::Space => {
-                        for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
-                            visual_chars.push(c);
-                            vis_to_log.push(t.start + offset);
-                        }
-                    }
-                }
-            }
-            t_idx = span_end + 1;
-        } else {
-            let t = &tokens[t_idx];
-            for (offset, &c) in shaped[t.start..t.end].iter().enumerate() {
-                visual_chars.push(c);
-                vis_to_log.push(t.start + offset);
-            }
-            t_idx += 1;
-        }
-    }
-
-    // Build inverse mapping: log_to_vis
-    let mut log_to_vis = vec![0; len];
-    for (v, &l) in vis_to_log.iter().enumerate() {
-        if l < len {
-            log_to_vis[l] = v;
-        }
-    }
-
     VisualLine {
-        chars: visual_chars,
-        vis_to_log,
-        log_to_vis,
+        chars: shaped,
+        vis_to_log: (0..len).collect(),
+        log_to_vis: (0..len).collect(),
     }
-}
-
-#[inline]
-fn is_persian_internal_punct(c: char) -> bool {
-    matches!(c, '-' | '/' | '\\' | 'ـ' | '\u{200C}' | '\u{200D}')
 }
 
 /// Transforms a logical text string into visual characters and mappings.
@@ -739,6 +585,8 @@ mod tests {
         let line1 = layout_line(text1);
         let s1: String = line1.chars.iter().collect();
         assert!(s1.starts_with("**"));
+        // First Persian word is shaped 'حالت' (\u{FEA3} initial heh)
+        assert_eq!(line1.chars[2], '\u{FEA3}');
         assert!(s1.contains("(Zen / Distraction-Free Mode)**"));
 
         let text2 = "- **کاربرد**: با زدن یک کلید";
