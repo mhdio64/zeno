@@ -68,6 +68,8 @@ pub enum Command {
     PreviousGitChange,
     /// Toggles highlighting occurrences of the word under cursor.
     ToggleWordHighlight,
+    /// Toggles Zen (distraction-free) mode (`Shift+F11`, `Leader z`).
+    ToggleZenMode,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -114,6 +116,7 @@ impl Command {
             Command::NextGitChange => "next_git_change",
             Command::PreviousGitChange => "previous_git_change",
             Command::ToggleWordHighlight => "toggle_word_highlight",
+            Command::ToggleZenMode => "toggle_zen_mode",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -184,6 +187,11 @@ impl Command {
             "toggle_word_highlight" | "toggle_highlight_word" | "word_highlight" => {
                 Command::ToggleWordHighlight
             }
+            "toggle_zen_mode"
+            | "zen_mode"
+            | "zen"
+            | "distraction_free"
+            | "toggle_distraction_free" => Command::ToggleZenMode,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -375,6 +383,7 @@ impl Sequences {
             ']' => Some(Command::IndentLine),
             '[' => Some(Command::UnindentLine),
             'J' | 'j' => Some(Command::JoinLines),
+            'z' | 'Z' => Some(Command::ToggleZenMode),
             '?' => Some(Command::Help),
             'p' => Some(Command::Palette),
             _ => None,
@@ -620,6 +629,7 @@ mod tests {
             Command::NextGitChange,
             Command::PreviousGitChange,
             Command::ToggleWordHighlight,
+            Command::ToggleZenMode,
             Command::Help,
             Command::Palette,
         ] {
@@ -673,6 +683,18 @@ mod tests {
     fn join_lines_is_a_standalone_command() {
         assert_eq!(run("J"), Step::Action(Action::Command(Command::JoinLines)));
         assert_eq!(run("j"), Step::Action(Action::Command(Command::JoinLines)));
+    }
+
+    #[test]
+    fn zen_mode_is_a_standalone_command() {
+        assert_eq!(
+            run("z"),
+            Step::Action(Action::Command(Command::ToggleZenMode))
+        );
+        assert_eq!(
+            run("Z"),
+            Step::Action(Action::Command(Command::ToggleZenMode))
+        );
     }
 
     #[test]
@@ -847,7 +869,7 @@ mod tests {
 
     #[test]
     fn an_unknown_mnemonic_cancels() {
-        assert_eq!(run("z"), Step::Cancelled);
+        assert_eq!(run("x"), Step::Cancelled);
     }
 
     #[test]

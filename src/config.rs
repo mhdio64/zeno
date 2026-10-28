@@ -39,6 +39,8 @@ pub struct Settings {
     pub git_gutter_style: String,
     /// Whether occurrences of the word under cursor are highlighted in the viewport.
     pub highlight_word: bool,
+    /// Whether Zen (distraction-free) mode is enabled.
+    pub zen_mode: bool,
 }
 
 impl Default for Settings {
@@ -56,6 +58,7 @@ impl Default for Settings {
             git_diff: true,
             git_gutter_style: "bar".to_string(),
             highlight_word: true,
+            zen_mode: false,
         }
     }
 }
@@ -231,6 +234,7 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "highlight_word" | "highlight_word_under_cursor" => {
             set_bool(&mut settings.highlight_word, value)
         }
+        "zen_mode" | "zen" | "distraction_free" => set_bool(&mut settings.zen_mode, value),
         "git_gutter_style" => {
             let trimmed = value.trim().trim_matches('"');
             if !trimmed.is_empty() {
@@ -595,6 +599,17 @@ leader = "ctrl+space"
         let text_alias = "[settings]\nhighlight_word_under_cursor = true\n";
         let config_alias = parse(text_alias);
         assert!(config_alias.highlight_word);
+    }
+
+    #[test]
+    fn zen_mode_setting_is_read() {
+        let text = "[settings]\nzen_mode = true\n";
+        let config = parse(text);
+        assert!(config.zen_mode);
+
+        let text_alias = "[settings]\ndistraction_free = true\n";
+        let config_alias = parse(text_alias);
+        assert!(config_alias.zen_mode);
     }
 
     impl Settings {

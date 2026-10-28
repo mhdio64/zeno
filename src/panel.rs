@@ -191,6 +191,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::JoinLines,
     },
     Entry {
+        keys: "shift+f11 / leader z",
+        label: "Toggle Zen mode",
+        command: Command::ToggleZenMode,
+    },
+    Entry {
         keys: "leader ]",
         label: "Indent line",
         command: Command::IndentLine,

@@ -573,6 +573,18 @@ struct Editor {
     trim_trailing_whitespace: bool,
     /// Git diff gutter tracking state.
     git: GitState,
+    /// Whether Zen (distraction-free) mode is enabled.
+    zen_mode: bool,
+    /// Saved gutter / scrollbar state prior to entering Zen mode.
+    zen_saved: Option<ZenSavedState>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ZenSavedState {
+    show_line_numbers: bool,
+    show_relative_numbers: bool,
+    show_scrollbar: bool,
+    show_git_diff: bool,
 }
 
 /// A panel that covers the document while it is open.
@@ -624,6 +636,8 @@ impl Editor {
             completion: None,
             trim_trailing_whitespace: false,
             git,
+            zen_mode: false,
+            zen_saved: None,
         }
     }
 
@@ -640,6 +654,9 @@ impl Editor {
         self.view.show_git_diff = settings.git_diff;
         self.view.git_gutter_style = settings.git_gutter_style.parse().unwrap_or_default();
         self.view.highlight_word = settings.highlight_word;
+        if settings.zen_mode != self.zen_mode {
+            self.toggle_zen_mode();
+        }
         self.trim_trailing_whitespace = settings.trim_trailing_whitespace;
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
@@ -805,6 +822,11 @@ impl Editor {
 
         if let KeyCode::F(1) = key.code {
             self.open_palette();
+            return;
+        }
+
+        if let KeyCode::F(11) = key.code {
+            self.toggle_zen_mode();
             return;
         }
 
@@ -1602,6 +1624,7 @@ impl Editor {
                 }
                 .into();
             }
+            Command::ToggleZenMode => self.toggle_zen_mode(),
             Command::RefreshGitDiff => {
                 self.git.refresh();
                 self.message = "refreshed git signs".into();
@@ -1915,6 +1938,36 @@ impl Editor {
         } else {
             "scrollbar off".into()
         };
+    }
+
+    fn toggle_zen_mode(&mut self) {
+        if self.zen_mode {
+            self.zen_mode = false;
+            if let Some(saved) = self.zen_saved.take() {
+                self.view.show_line_numbers = saved.show_line_numbers;
+                self.view.show_relative_numbers = saved.show_relative_numbers;
+                self.view.show_scrollbar = saved.show_scrollbar;
+                self.view.show_git_diff = saved.show_git_diff;
+            } else {
+                self.view.show_line_numbers = true;
+                self.view.show_scrollbar = true;
+                self.view.show_git_diff = true;
+            }
+            self.message = "zen mode disabled".into();
+        } else {
+            self.zen_saved = Some(ZenSavedState {
+                show_line_numbers: self.view.show_line_numbers,
+                show_relative_numbers: self.view.show_relative_numbers,
+                show_scrollbar: self.view.show_scrollbar,
+                show_git_diff: self.view.show_git_diff,
+            });
+            self.zen_mode = true;
+            self.view.show_line_numbers = false;
+            self.view.show_relative_numbers = false;
+            self.view.show_scrollbar = false;
+            self.view.show_git_diff = false;
+            self.message = "zen mode enabled".into();
+        }
     }
 
     /// Starts a word auto-completion session (`Ctrl+N`).
@@ -3768,12 +3821,17 @@ impl Editor {
         self.poll_search();
         let size = terminal.size()?;
         let area = Rect::new(0, 0, size.width, size.height);
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(1)])
-            .split(area);
-        let body = chunks[0];
-        let status = chunks[1];
+        let has_prompt = self.prompt.is_some();
+        let show_status_bar = !self.zen_mode || has_prompt;
+        let (body, status) = if show_status_bar {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Min(1), Constraint::Length(1)])
+                .split(area);
+            (chunks[0], chunks[1])
+        } else {
+            (area, Rect::default())
+        };
 
         self.viewport_height_hint = body.height;
         // The width the editor scrolls by is the width of the *text*, not the
@@ -3846,7 +3904,9 @@ impl Editor {
                     }
                 }
                 None => {
-                    f.render_widget(self.status_line(), status);
+                    if show_status_bar {
+                        f.render_widget(self.status_line(), status);
+                    }
                     if let Some((x, y)) = cursor {
                         f.set_cursor_position((x, y));
                     }
@@ -7031,5 +7091,41 @@ trim_trailing_whitespace = true
         e.command(Command::PreviousGitChange);
         assert_eq!(e.view.cursor_line, 3);
         assert_eq!(e.message, "already at only git change");
+    }
+
+    #[test]
+    fn zen_mode_toggle_command_and_f11_hide_and_restore_elements() {
+        let (mut e, _p) = editor_with("zen-test.txt", b"hello\nworld\n");
+        assert!(!e.zen_mode);
+        assert!(e.view.show_line_numbers);
+        assert!(e.view.show_scrollbar);
+        assert!(e.view.show_git_diff);
+
+        // Turn Zen mode ON via Command
+        e.command(Command::ToggleZenMode);
+        assert!(e.zen_mode);
+        assert!(!e.view.show_line_numbers);
+        assert!(!e.view.show_scrollbar);
+        assert!(!e.view.show_git_diff);
+        assert_eq!(e.message, "zen mode enabled");
+
+        // Turn Zen mode OFF via F11
+        e.handle_key(KeyEvent::new(KeyCode::F(11), KeyModifiers::NONE));
+        assert!(!e.zen_mode);
+        assert!(e.view.show_line_numbers);
+        assert!(e.view.show_scrollbar);
+        assert!(e.view.show_git_diff);
+        assert_eq!(e.message, "zen mode disabled");
+    }
+
+    #[test]
+    fn zen_mode_setting_applied_from_config() {
+        let (mut e, _p) = editor_with("zen-config.txt", b"hello\n");
+        let config = zeno_cli::config::parse_config("[settings]\nzen_mode = true\n");
+        e.apply_settings(&config);
+        assert!(e.zen_mode);
+        assert!(!e.view.show_line_numbers);
+        assert!(!e.view.show_scrollbar);
+        assert!(!e.view.show_git_diff);
     }
 }
