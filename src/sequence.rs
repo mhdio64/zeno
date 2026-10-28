@@ -56,6 +56,8 @@ pub enum Command {
     DuplicateLine,
     /// Duplicates the current line or selection up (`Shift+Alt+Up`).
     DuplicateLineUp,
+    /// Joins the current line with the next, or joins selected lines (`Ctrl+J`, `Leader J`).
+    JoinLines,
     /// Toggles git diff gutter signs.
     ToggleGitDiff,
     /// Refreshes git diff gutter signs from git HEAD.
@@ -106,6 +108,7 @@ impl Command {
             Command::DeleteToEndOfLine => "delete_to_end_of_line",
             Command::DuplicateLine => "duplicate_line",
             Command::DuplicateLineUp => "duplicate_line_up",
+            Command::JoinLines => "join_lines",
             Command::ToggleGitDiff => "toggle_git_diff",
             Command::RefreshGitDiff => "refresh_git_diff",
             Command::NextGitChange => "next_git_change",
@@ -169,6 +172,7 @@ impl Command {
             | "duplicate_line_down"
             | "copy_line_down" => Command::DuplicateLine,
             "duplicate_line_up" | "duplicate_up" | "copy_line_up" => Command::DuplicateLineUp,
+            "join_lines" | "join" | "join_line" => Command::JoinLines,
             "toggle_git_diff" | "toggle_git_gutter" | "git_diff" => Command::ToggleGitDiff,
             "refresh_git_diff" | "refresh_git" | "git_refresh" => Command::RefreshGitDiff,
             "next_git_change" | "next_change" | "next_hunk" => Command::NextGitChange,
@@ -370,6 +374,7 @@ impl Sequences {
             'N' => Some(Command::PreviousMatch),
             ']' => Some(Command::IndentLine),
             '[' => Some(Command::UnindentLine),
+            'J' | 'j' => Some(Command::JoinLines),
             '?' => Some(Command::Help),
             'p' => Some(Command::Palette),
             _ => None,
@@ -609,6 +614,7 @@ mod tests {
             Command::DeleteToEndOfLine,
             Command::DuplicateLine,
             Command::DuplicateLineUp,
+            Command::JoinLines,
             Command::ToggleGitDiff,
             Command::RefreshGitDiff,
             Command::NextGitChange,
@@ -661,6 +667,12 @@ mod tests {
             run("w"),
             Step::Action(Action::Command(Command::ToggleWordWrap))
         );
+    }
+
+    #[test]
+    fn join_lines_is_a_standalone_command() {
+        assert_eq!(run("J"), Step::Action(Action::Command(Command::JoinLines)));
+        assert_eq!(run("j"), Step::Action(Action::Command(Command::JoinLines)));
     }
 
     #[test]

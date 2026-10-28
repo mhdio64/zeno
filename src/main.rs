@@ -929,6 +929,10 @@ impl Editor {
                     self.delete_word_before();
                     return;
                 }
+                Some('j') => {
+                    self.join_lines();
+                    return;
+                }
                 Some('k') => {
                     if alt {
                         self.delete_to_end_of_line();
@@ -1579,6 +1583,7 @@ impl Editor {
             Command::DeleteToEndOfLine => self.delete_to_end_of_line(),
             Command::DuplicateLine => self.duplicate_line(),
             Command::DuplicateLineUp => self.duplicate_line_up(),
+            Command::JoinLines => self.join_lines(),
             Command::ToggleGitDiff => {
                 self.view.show_git_diff = !self.view.show_git_diff;
                 self.message = if self.view.show_git_diff {
@@ -2729,6 +2734,70 @@ impl Editor {
 
         self.doc.edit(range_start, range_start, &text);
 
+        self.dirty = true;
+        self.message.clear();
+        self.ensure_cursor_visible();
+    }
+
+    /// `Ctrl+J`, `Leader J`: joins the current line with the next, or joins selected lines.
+    fn join_lines(&mut self) {
+        let (first, last) = if let Some((from, to)) = self.selection() {
+            let first = from.line;
+            let last = if to.col == 0 && to.line > first {
+                to.line - 1
+            } else {
+                to.line
+            };
+            if first == last {
+                (first, first + 1)
+            } else {
+                (first, last)
+            }
+        } else {
+            let line = self.view.cursor_line;
+            (line, line + 1)
+        };
+
+        if self.doc.line_text(first).is_none() || self.doc.line_text(last).is_none() {
+            return;
+        }
+
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        if !self.range_is_affordable(range_start, range_end) {
+            self.message = self.too_large(range_start, range_end);
+            return;
+        }
+
+        let mut joined = String::new();
+        let mut join_cursor_col = None;
+
+        for (idx, l) in (first..=last).enumerate() {
+            let raw = self.line_text(l);
+            if idx == 0 {
+                let trimmed = raw.trim_end();
+                joined.push_str(trimmed);
+                join_cursor_col = Some(joined.chars().count());
+            } else {
+                let trimmed = raw.trim();
+                if !trimmed.is_empty() {
+                    if !joined.is_empty() {
+                        joined.push(' ');
+                    }
+                    joined.push_str(trimmed);
+                }
+            }
+        }
+
+        self.doc.edit(range_start, range_end, &joined);
+
+        self.view.anchor = None;
+        self.view.cursor_line = first;
+        if let Some(col) = join_cursor_col {
+            self.view.cursor_col = col.min(self.line_len(first));
+        } else {
+            self.clamp_column();
+        }
         self.dirty = true;
         self.message.clear();
         self.ensure_cursor_visible();
@@ -4172,6 +4241,61 @@ mod tests {
         assert_eq!(line(&e, 2), "x");
         assert_eq!(line(&e, 3), "y");
         assert_eq!(e.view.cursor_line, 1);
+    }
+
+    #[test]
+    fn ctrl_j_joins_current_line_with_next_and_cleans_indent() {
+        let (mut e, _p) = editor_with("join-test.txt", b"    hello\n        world\n");
+        e.view.cursor_line = 0;
+        e.view.cursor_col = 4;
+
+        e.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(line(&e, 0), "    hello world");
+        assert_eq!(e.doc.line_count(), 1);
+        // Cursor placed at the space between joined lines (index 9)
+        assert_eq!(e.view.cursor_line, 0);
+        assert_eq!(e.view.cursor_col, 9);
+
+        // One undo restores both original lines
+        e.undo();
+        assert_eq!(line(&e, 0), "    hello");
+        assert_eq!(line(&e, 1), "        world");
+        assert_eq!(e.doc.line_count(), 2);
+    }
+
+    #[test]
+    fn join_lines_with_multi_line_selection() {
+        let (mut e, _p) = editor_with(
+            "join-sel.txt",
+            b"The quick\n    brown fox\n        jumps over\n",
+        );
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_line = 2;
+        e.view.cursor_col = 18;
+
+        e.join_lines();
+        assert_eq!(line(&e, 0), "The quick brown fox jumps over");
+        assert_eq!(e.doc.line_count(), 1);
+        assert_eq!(e.view.anchor, None);
+        assert_eq!(e.view.cursor_line, 0);
+    }
+
+    #[test]
+    fn join_lines_at_eof_does_nothing() {
+        let (mut e, _p) = editor_with("join-eof.txt", b"single line\n");
+        e.view.cursor_line = 0;
+        e.join_lines();
+        assert_eq!(line(&e, 0), "single line");
+        assert_eq!(e.doc.line_count(), 1);
+    }
+
+    #[test]
+    fn command_join_lines_from_palette() {
+        let (mut e, _p) = editor_with("join-cmd.txt", b"foo\nbar\n");
+        e.view.cursor_line = 0;
+        e.command(Command::JoinLines);
+        assert_eq!(line(&e, 0), "foo bar");
+        assert_eq!(e.doc.line_count(), 1);
     }
 
     #[test]

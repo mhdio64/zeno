@@ -186,6 +186,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::DuplicateLineUp,
     },
     Entry {
+        keys: "ctrl+j / leader J",
+        label: "Join lines",
+        command: Command::JoinLines,
+    },
+    Entry {
         keys: "leader ]",
         label: "Indent line",
         command: Command::IndentLine,
