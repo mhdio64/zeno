@@ -161,6 +161,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::PreviousGitChange,
     },
     Entry {
+        keys: "",
+        label: "Toggle highlight word under cursor",
+        command: Command::ToggleWordHighlight,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

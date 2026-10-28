@@ -60,6 +60,8 @@ pub enum Command {
     NextGitChange,
     /// Jumps to the previous git change hunk (`Alt+[`).
     PreviousGitChange,
+    /// Toggles highlighting occurrences of the word under cursor.
+    ToggleWordHighlight,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -102,6 +104,7 @@ impl Command {
             Command::RefreshGitDiff => "refresh_git_diff",
             Command::NextGitChange => "next_git_change",
             Command::PreviousGitChange => "previous_git_change",
+            Command::ToggleWordHighlight => "toggle_word_highlight",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -162,6 +165,9 @@ impl Command {
             | "prev_change"
             | "previous_hunk"
             | "prev_hunk" => Command::PreviousGitChange,
+            "toggle_word_highlight" | "toggle_highlight_word" | "word_highlight" => {
+                Command::ToggleWordHighlight
+            }
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -593,6 +599,7 @@ mod tests {
             Command::RefreshGitDiff,
             Command::NextGitChange,
             Command::PreviousGitChange,
+            Command::ToggleWordHighlight,
             Command::Help,
             Command::Palette,
         ] {

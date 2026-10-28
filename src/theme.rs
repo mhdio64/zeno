@@ -185,6 +185,17 @@ impl ThemeColors {
             self.fg
         }
     }
+
+    /// Background color for occurrences of the word under the cursor.
+    pub fn word_match_bg(&self) -> Color {
+        if !self.is_dark {
+            Color::Rgb(225, 220, 200)
+        } else if self.bg == Color::Black && self.fg == Color::White {
+            Color::Rgb(40, 40, 40)
+        } else {
+            Color::Rgb(65, 72, 85)
+        }
+    }
 }
 
 impl Default for ThemeColors {

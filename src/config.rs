@@ -37,6 +37,8 @@ pub struct Settings {
     pub git_diff: bool,
     /// Visual style of git diff gutter symbols ("bar" or "ascii").
     pub git_gutter_style: String,
+    /// Whether occurrences of the word under cursor are highlighted in the viewport.
+    pub highlight_word: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +55,7 @@ impl Default for Settings {
             trim_trailing_whitespace: false,
             git_diff: true,
             git_gutter_style: "bar".to_string(),
+            highlight_word: true,
         }
     }
 }
@@ -225,6 +228,9 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "scrollbar" => set_bool(&mut settings.scrollbar, value),
         "trim_trailing_whitespace" => set_bool(&mut settings.trim_trailing_whitespace, value),
         "git_diff" | "git_gutter" => set_bool(&mut settings.git_diff, value),
+        "highlight_word" | "highlight_word_under_cursor" => {
+            set_bool(&mut settings.highlight_word, value)
+        }
         "git_gutter_style" => {
             let trimmed = value.trim().trim_matches('"');
             if !trimmed.is_empty() {
@@ -578,6 +584,17 @@ leader = "ctrl+space"
         let config = parse(text);
         assert!(!config.git_diff);
         assert_eq!(config.git_gutter_style, "ascii");
+    }
+
+    #[test]
+    fn highlight_word_setting_is_read() {
+        let text = "[settings]\nhighlight_word = false\n";
+        let config = parse(text);
+        assert!(!config.highlight_word);
+
+        let text_alias = "[settings]\nhighlight_word_under_cursor = true\n";
+        let config_alias = parse(text_alias);
+        assert!(config_alias.highlight_word);
     }
 
     impl Settings {

@@ -12,6 +12,7 @@ use ratatui::widgets::{Paragraph, Widget};
 
 use std::collections::HashMap;
 
+use crate::complete::is_word_char;
 use crate::doc::Doc;
 use crate::doc::edit::Pos;
 use crate::git::{DiffSign, GitGutterStyle};
@@ -69,6 +70,8 @@ pub struct ViewState {
     pub show_git_diff: bool,
     /// Visual style of the diff signs in the gutter.
     pub git_gutter_style: GitGutterStyle,
+    /// Whether occurrences of the word under cursor are highlighted in the viewport.
+    pub highlight_word: bool,
 }
 
 impl Default for ViewState {
@@ -88,6 +91,7 @@ impl Default for ViewState {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         }
     }
 }
@@ -224,6 +228,11 @@ impl<'a> View<'a> {
             .collect()
     }
 
+    /// Finds the word under the cursor at `(line, col)` if any.
+    pub fn word_under_cursor(&self) -> Option<String> {
+        word_under_cursor(self.doc, self.state.cursor_line, self.state.cursor_col)
+    }
+
     /// The coloured runs of `line` that fall inside the window.
     ///
     /// The spans are in the line's own columns; the window shows a slice of
@@ -257,6 +266,7 @@ impl<'a> View<'a> {
         text: &str,
         base: Style,
         syntax: &[(usize, usize, Style)],
+        word_matches: &[(usize, usize)],
         selection: Option<(usize, usize)>,
         matches: &[(usize, usize)],
     ) -> Vec<Span<'static>> {
@@ -270,6 +280,15 @@ impl<'a> View<'a> {
             let end = (*end).clamp(start, chars.len());
             for slot in &mut styles[start..end] {
                 *slot = (*slot).patch(*style);
+            }
+        }
+        // Word under cursor matches: subtle background + underline
+        let word_style = self.word_match_style();
+        for (start, end) in word_matches {
+            let start = (*start).min(chars.len());
+            let end = (*end).clamp(start, chars.len());
+            for slot in &mut styles[start..end] {
+                *slot = (*slot).patch(word_style);
             }
         }
         for (start, end) in matches {
@@ -574,6 +593,13 @@ impl View<'_> {
                 .bg(Color::Rgb(181, 137, 0))
         }
     }
+
+    /// The style an occurrence of the word under cursor is painted in.
+    fn word_match_style(&self) -> Style {
+        Style::default()
+            .bg(self.theme.word_match_bg())
+            .add_modifier(Modifier::UNDERLINED)
+    }
 }
 
 /// How far past the right edge the search pattern is still read.
@@ -605,6 +631,12 @@ impl Widget for View<'_> {
 
         let mut gutter_lines: Vec<Line> = Vec::with_capacity(area.height as usize);
         let mut body_lines: Vec<Line> = Vec::with_capacity(area.height as usize);
+
+        let current_word = if self.state.highlight_word && self.state.anchor.is_none() {
+            self.word_under_cursor()
+        } else {
+            None
+        };
 
         for (row, starts_line) in self.layout_rows(body_width as usize, area.height) {
             let line_no = row.line;
@@ -691,11 +723,23 @@ impl Widget for View<'_> {
                 let to = to.max(left).min(left + painted);
                 (from - left, to - left)
             });
+            let word_matches = if let Some(ref word) = current_word {
+                find_word_occurrences(head, word, left - behind, painted)
+            } else {
+                Vec::new()
+            };
             let matches = self.match_ranges_in(head, left - behind, painted);
             let syntax = self.syntax_spans(line_no, left, painted);
             body_lines.push(
-                Line::from(self.styled_spans(&clipped, base, &syntax, selection, &matches))
-                    .style(base),
+                Line::from(self.styled_spans(
+                    &clipped,
+                    base,
+                    &syntax,
+                    &word_matches,
+                    selection,
+                    &matches,
+                ))
+                .style(base),
             );
         }
 
@@ -763,6 +807,77 @@ impl Widget for View<'_> {
     }
 }
 
+/// Finds the word under the cursor at `(line, col)` if any.
+pub fn word_under_cursor(doc: &Doc, line: u64, col: usize) -> Option<String> {
+    let text = doc.line_text(line)?;
+    let chars: Vec<char> = text.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let pos = if col < chars.len() && is_word_char(chars[col]) {
+        col
+    } else if col == chars.len() && col > 0 && is_word_char(chars[col - 1]) {
+        col - 1
+    } else {
+        return None;
+    };
+
+    let mut start = pos;
+    while start > 0 && is_word_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = pos;
+    while end < chars.len() && is_word_char(chars[end]) {
+        end += 1;
+    }
+
+    if end <= start {
+        return None;
+    }
+    let word: String = chars[start..end].iter().collect();
+    if word.len() < 2 || word.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(word)
+}
+
+/// Finds all whole-word occurrences of `word` in `text` within `[offset..offset + painted]`.
+pub fn find_word_occurrences(
+    text: &str,
+    word: &str,
+    offset: usize,
+    painted: usize,
+) -> Vec<(usize, usize)> {
+    if word.is_empty() || painted == 0 {
+        return Vec::new();
+    }
+    let scanned = take_chars(text, offset + painted + word.len().max(MATCH_LOOKAHEAD) + 1);
+    let chars: Vec<char> = scanned.chars().collect();
+    let word_chars: Vec<char> = word.chars().collect();
+    let word_len = word_chars.len();
+    if chars.len() < word_len {
+        return Vec::new();
+    }
+
+    let mut ranges = Vec::new();
+    let limit = chars.len().saturating_sub(word_len);
+
+    for i in 0..=limit {
+        if chars[i..i + word_len] == word_chars[..] {
+            let left_ok = i == 0 || !is_word_char(chars[i - 1]);
+            let right_ok = (i + word_len) == chars.len() || !is_word_char(chars[i + word_len]);
+            if left_ok && right_ok {
+                let start = i.saturating_sub(offset);
+                let end = (i + word_len).saturating_sub(offset);
+                if start < painted && end > start {
+                    ranges.push((start.min(painted), end.min(painted)));
+                }
+            }
+        }
+    }
+    ranges
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -826,6 +941,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let text = frame_text(&doc, &state, 20, 4);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -860,6 +976,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("alpha"), "{text}");
@@ -884,6 +1001,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("three"), "{text}");
@@ -908,6 +1026,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 4)));
@@ -954,6 +1073,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -979,6 +1099,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -1007,6 +1128,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1045,6 +1167,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1086,6 +1209,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let view = View::new(&doc, &state);
         assert!(view.match_ranges(0, 20).is_empty());
@@ -1109,6 +1233,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 20, 3);
@@ -1135,6 +1260,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         }
     }
 
@@ -1291,6 +1417,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         }
     }
 
@@ -1334,6 +1461,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let text = frame_text(&doc, &state, 16, 5);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -1403,6 +1531,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1432,6 +1561,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1465,6 +1595,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1513,6 +1644,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1540,6 +1672,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1566,6 +1699,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
         };
         let buffer = draw(&doc, &state, None);
         assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
@@ -1590,6 +1724,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::MONOKAI);
         // Cursor line gets Monokai's #3e3d32
@@ -1619,6 +1754,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::SOLARIZED_LIGHT);
         // Selection is dark navy #073642 on light theme
@@ -1638,6 +1774,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
             ..ViewState::default()
         };
         let view = View::new(&doc, &state);
@@ -1657,6 +1794,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
             show_line_numbers: false,
             ..ViewState::default()
         };
@@ -1691,6 +1829,7 @@ mod tests {
             show_scrollbar: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
             show_line_numbers: false,
             ..ViewState::default()
         };
@@ -1739,6 +1878,7 @@ mod tests {
             show_line_numbers: true,
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: true,
             ..ViewState::default()
         };
 
@@ -1805,5 +1945,118 @@ mod tests {
         assert_eq!(buffer[(3, 1)].fg, Color::Yellow);
         assert_eq!(buffer[(3, 2)].symbol(), "-");
         assert_eq!(buffer[(3, 2)].fg, Color::Red);
+    }
+
+    #[test]
+    fn word_under_cursor_extraction() {
+        let doc = doc_of("words.txt", b"let alpha_12 = beta + 42;\n");
+        // 'let' (col 0..3)
+        assert_eq!(word_under_cursor(&doc, 0, 0).as_deref(), Some("let"));
+        assert_eq!(word_under_cursor(&doc, 0, 2).as_deref(), Some("let"));
+        // space at col 3
+        assert_eq!(word_under_cursor(&doc, 0, 3), None);
+        // 'alpha_12' (col 4..12)
+        assert_eq!(word_under_cursor(&doc, 0, 4).as_deref(), Some("alpha_12"));
+        assert_eq!(word_under_cursor(&doc, 0, 10).as_deref(), Some("alpha_12"));
+        // '=' at col 13
+        assert_eq!(word_under_cursor(&doc, 0, 13), None);
+        // '42' (pure number) at col 22
+        assert_eq!(word_under_cursor(&doc, 0, 22), None);
+        // ';' at col 24
+        assert_eq!(word_under_cursor(&doc, 0, 24), None);
+
+        // 1-letter word is ignored
+        let doc_one = doc_of("one.txt", b"x = 1\n");
+        assert_eq!(word_under_cursor(&doc_one, 0, 0), None);
+    }
+
+    #[test]
+    fn find_word_occurrences_exact_boundary() {
+        let text = "alpha alpha_beta beta_alpha alpha";
+        let matches = find_word_occurrences(text, "alpha", 0, 35);
+        // Only first "alpha" (0..5) and last "alpha" (28..33)
+        assert_eq!(matches, vec![(0, 5), (28, 33)]);
+    }
+
+    #[test]
+    fn word_under_cursor_highlights_in_rendered_buffer() {
+        let doc = doc_of("hl.txt", b"hello world hello\n");
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col: 1, // inside first "hello"
+            show_line_numbers: false,
+            highlight_word: true,
+            ..ViewState::default()
+        };
+
+        let backend = TestBackend::new(25, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View::new(&doc, &state);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Both "hello" occurrences (cols 0..5 and 12..17) should have UNDERLINED
+        for col in 0..5 {
+            assert!(
+                buffer[(col, 0)].modifier.contains(Modifier::UNDERLINED),
+                "col {col} should be underlined"
+            );
+        }
+        for col in 12..17 {
+            assert!(
+                buffer[(col, 0)].modifier.contains(Modifier::UNDERLINED),
+                "col {col} should be underlined"
+            );
+        }
+        // "world" (cols 6..11) should NOT have UNDERLINED
+        for col in 6..11 {
+            assert!(
+                !buffer[(col, 0)].modifier.contains(Modifier::UNDERLINED),
+                "col {col} should not be underlined"
+            );
+        }
+
+        // When highlight_word is false, no underline
+        let state_off = ViewState {
+            highlight_word: false,
+            ..state.clone()
+        };
+        let backend_off = TestBackend::new(25, 1);
+        let mut terminal_off = Terminal::new(backend_off).unwrap();
+        terminal_off
+            .draw(|f| {
+                let view = View::new(&doc, &state_off);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer_off = terminal_off.backend().buffer();
+        for col in 0..5 {
+            assert!(
+                !buffer_off[(col, 0)].modifier.contains(Modifier::UNDERLINED),
+                "col {col} should not be underlined when disabled"
+            );
+        }
+
+        // When selection (anchor) is active, word highlight is disabled
+        let state_sel = ViewState {
+            anchor: Some(Pos { line: 0, col: 0 }),
+            ..state.clone()
+        };
+        let backend_sel = TestBackend::new(25, 1);
+        let mut terminal_sel = Terminal::new(backend_sel).unwrap();
+        terminal_sel
+            .draw(|f| {
+                let view = View::new(&doc, &state_sel);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer_sel = terminal_sel.backend().buffer();
+        // col 12 (second "hello") is outside selection, should not be underlined
+        assert!(!buffer_sel[(12, 0)].modifier.contains(Modifier::UNDERLINED));
     }
 }

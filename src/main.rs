@@ -639,6 +639,7 @@ impl Editor {
         self.view.show_scrollbar = settings.scrollbar;
         self.view.show_git_diff = settings.git_diff;
         self.view.git_gutter_style = settings.git_gutter_style.parse().unwrap_or_default();
+        self.view.highlight_word = settings.highlight_word;
         self.trim_trailing_whitespace = settings.trim_trailing_whitespace;
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
@@ -1574,6 +1575,15 @@ impl Editor {
                     "git diff signs enabled"
                 } else {
                     "git diff signs disabled"
+                }
+                .into();
+            }
+            Command::ToggleWordHighlight => {
+                self.view.highlight_word = !self.view.highlight_word;
+                self.message = if self.view.highlight_word {
+                    "word highlight enabled"
+                } else {
+                    "word highlight disabled"
                 }
                 .into();
             }
@@ -6637,6 +6647,18 @@ trim_trailing_whitespace = true
         e.command(Command::ToggleGitDiff);
         assert!(e.view.show_git_diff);
         assert_eq!(e.message, "git diff signs enabled");
+    }
+
+    #[test]
+    fn word_highlight_toggle_command_toggles_and_reports_message() {
+        let (mut e, _p) = editor_with("word-highlight-toggle.txt", b"hello\n");
+        assert!(e.view.highlight_word);
+        e.command(Command::ToggleWordHighlight);
+        assert!(!e.view.highlight_word);
+        assert_eq!(e.message, "word highlight disabled");
+        e.command(Command::ToggleWordHighlight);
+        assert!(e.view.highlight_word);
+        assert_eq!(e.message, "word highlight enabled");
     }
 
     #[test]
