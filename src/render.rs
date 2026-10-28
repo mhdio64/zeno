@@ -308,13 +308,25 @@ impl<'a> View<'a> {
             }
         }
 
+        let (display_chars, display_styles) = if crate::persian::has_rtl_chars(&chars) {
+            let layout = crate::persian::layout_chars(&chars);
+            let reordered_styles: Vec<Style> = layout
+                .vis_to_log
+                .iter()
+                .map(|&log_idx| styles[log_idx])
+                .collect();
+            (layout.chars, reordered_styles)
+        } else {
+            (chars, styles)
+        };
+
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut start = 0;
-        for col in 1..=chars.len() {
-            if col == chars.len() || styles[col] != styles[start] {
+        for col in 1..=display_chars.len() {
+            if col == display_chars.len() || display_styles[col] != display_styles[start] {
                 spans.push(Span::styled(
-                    chars[start..col].iter().collect::<String>(),
-                    styles[start],
+                    display_chars[start..col].iter().collect::<String>(),
+                    display_styles[start],
                 ));
                 start = col;
             }
@@ -347,7 +359,15 @@ impl<'a> View<'a> {
         // `cursor_col` is the character column: the editor keeps it inside
         // the line, and walking the line to count it again would cost a
         // keystroke's worth of work on a line with a million characters.
-        let col = self.state.cursor_col;
+        let col = if let Some(text) = self.doc.line_text(self.state.cursor_line) {
+            if crate::persian::has_rtl(&text) {
+                crate::persian::logical_to_visual(&text, self.state.cursor_col)
+            } else {
+                self.state.cursor_col
+            }
+        } else {
+            self.state.cursor_col
+        };
         let left = self.state.left_col;
         if col < left || col - left >= body_width as usize {
             return None;
@@ -2058,5 +2078,69 @@ mod tests {
         let buffer_sel = terminal_sel.backend().buffer();
         // col 12 (second "hello") is outside selection, should not be underlined
         assert!(!buffer_sel[(12, 0)].modifier.contains(Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn persian_text_renders_shaped_and_reordered_in_terminal_buffer() {
+        let doc = doc_of("fa.txt", "سلام\n".as_bytes());
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 0,
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+            show_scrollbar: false,
+            show_git_diff: false,
+            git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
+        };
+        let backend = TestBackend::new(20, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View::new(&doc, &state);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        // The characters must be shaped into presentation forms:
+        // سلام shaped: [FEB3 (س initial), FEE0 (ل medial), FE8E (ا final), FEE1 (م isolated)]
+        // In visual order for RTL line: [FEE1, FE8E, FEE0, FEB3]
+        assert_eq!(buffer[(0, 0)].symbol(), "\u{FEE1}");
+        assert_eq!(buffer[(1, 0)].symbol(), "\u{FE8E}");
+        assert_eq!(buffer[(2, 0)].symbol(), "\u{FEE0}");
+        assert_eq!(buffer[(3, 0)].symbol(), "\u{FEB3}");
+    }
+
+    #[test]
+    fn cursor_position_on_persian_line_maps_to_visual_column() {
+        let doc = doc_of("fa.txt", "سلام\n".as_bytes());
+        let state = ViewState {
+            top_line: 0,
+            top_row: 0,
+            word_wrap: false,
+            cursor_line: 0,
+            cursor_col: 0, // logical col 0 is 'س'
+            show_line_numbers: false,
+            show_relative_numbers: false,
+            width: 20,
+            left_col: 0,
+            anchor: None,
+            highlight_pattern: None,
+            show_scrollbar: false,
+            show_git_diff: false,
+            git_gutter_style: GitGutterStyle::Bar,
+            highlight_word: false,
+        };
+        let view = View::new(&doc, &state);
+        let pos = view.cursor_position(Rect::new(0, 0, 20, 2));
+        // Logical 0 ('س') is at visual column 3 on screen
+        assert_eq!(pos, Some((3, 0)));
     }
 }

@@ -1409,11 +1409,12 @@ impl Editor {
             return;
         }
         let text = line.as_str();
+        let chars: Vec<char> = text.chars().collect();
         // Find the start of the word by going backwards from the cursor
-        let mut char_idx = col;
+        let mut char_idx = col.min(chars.len());
         // Go backwards past word characters (alphanumeric)
         while char_idx > 0 {
-            let c = text[char_idx - 1..char_idx].chars().next().unwrap_or(' ');
+            let c = chars[char_idx - 1];
             if !c.is_alphanumeric() {
                 break;
             }
@@ -1421,7 +1422,7 @@ impl Editor {
         }
         // Skip past any whitespace before the word
         while char_idx > 0 {
-            let c = text[char_idx - 1..char_idx].chars().next().unwrap_or(' ');
+            let c = chars[char_idx - 1];
             if c.is_whitespace() {
                 break;
             }
@@ -7127,5 +7128,13 @@ trim_trailing_whitespace = true
         assert!(!e.view.show_line_numbers);
         assert!(!e.view.show_scrollbar);
         assert!(!e.view.show_git_diff);
+    }
+
+    #[test]
+    fn delete_word_before_persian_multibyte_without_panic() {
+        let (mut e, _p) = editor_with("persian.txt", "سلام دنیا\n".as_bytes());
+        e.set_cursor_col(9); // at the end of the line
+        e.delete_word_before();
+        assert_eq!(e.doc.line_text(0).unwrap(), "سلام ");
     }
 }

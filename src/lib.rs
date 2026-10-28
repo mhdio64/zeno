@@ -16,6 +16,7 @@ pub mod indent;
 pub mod keys;
 pub mod motion;
 pub mod panel;
+pub mod persian;
 pub mod prompt;
 pub mod recent;
 pub mod render;
