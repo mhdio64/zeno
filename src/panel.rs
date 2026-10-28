@@ -176,6 +176,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::MoveLineDown,
     },
     Entry {
+        keys: "shift+alt+down / ctrl+d",
+        label: "Duplicate line",
+        command: Command::DuplicateLine,
+    },
+    Entry {
+        keys: "shift+alt+up",
+        label: "Duplicate line up",
+        command: Command::DuplicateLineUp,
+    },
+    Entry {
         keys: "leader ]",
         label: "Indent line",
         command: Command::IndentLine,

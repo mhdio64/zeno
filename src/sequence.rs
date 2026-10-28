@@ -52,6 +52,10 @@ pub enum Command {
     DeleteLine,
     /// Deletes from the cursor to the end of the line (`Ctrl+Alt+K`).
     DeleteToEndOfLine,
+    /// Duplicates the current line or selection down (`Shift+Alt+Down`, `Ctrl+D`).
+    DuplicateLine,
+    /// Duplicates the current line or selection up (`Shift+Alt+Up`).
+    DuplicateLineUp,
     /// Toggles git diff gutter signs.
     ToggleGitDiff,
     /// Refreshes git diff gutter signs from git HEAD.
@@ -100,6 +104,8 @@ impl Command {
             Command::TrimTrailingWhitespace => "trim_trailing_whitespace",
             Command::DeleteLine => "delete_line",
             Command::DeleteToEndOfLine => "delete_to_end_of_line",
+            Command::DuplicateLine => "duplicate_line",
+            Command::DuplicateLineUp => "duplicate_line_up",
             Command::ToggleGitDiff => "toggle_git_diff",
             Command::RefreshGitDiff => "refresh_git_diff",
             Command::NextGitChange => "next_git_change",
@@ -157,6 +163,12 @@ impl Command {
             }
             "delete_line" | "cut_line" | "kill_line" => Command::DeleteLine,
             "delete_to_end_of_line" | "delete_to_eol" | "kill_to_end" => Command::DeleteToEndOfLine,
+            "duplicate_line"
+            | "duplicate"
+            | "duplicate_down"
+            | "duplicate_line_down"
+            | "copy_line_down" => Command::DuplicateLine,
+            "duplicate_line_up" | "duplicate_up" | "copy_line_up" => Command::DuplicateLineUp,
             "toggle_git_diff" | "toggle_git_gutter" | "git_diff" => Command::ToggleGitDiff,
             "refresh_git_diff" | "refresh_git" | "git_refresh" => Command::RefreshGitDiff,
             "next_git_change" | "next_change" | "next_hunk" => Command::NextGitChange,
@@ -595,6 +607,8 @@ mod tests {
             Command::TrimTrailingWhitespace,
             Command::DeleteLine,
             Command::DeleteToEndOfLine,
+            Command::DuplicateLine,
+            Command::DuplicateLineUp,
             Command::ToggleGitDiff,
             Command::RefreshGitDiff,
             Command::NextGitChange,

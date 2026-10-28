@@ -844,11 +844,19 @@ impl Editor {
                 return;
             }
             if let KeyCode::Up = key.code {
-                self.move_line_up();
+                if shift {
+                    self.duplicate_line_up();
+                } else {
+                    self.move_line_up();
+                }
                 return;
             }
             if let KeyCode::Down = key.code {
-                self.move_line_down();
+                if shift {
+                    self.duplicate_line();
+                } else {
+                    self.move_line_down();
+                }
                 return;
             }
             if let KeyCode::Char(']' | '}') = key.code {
@@ -1569,6 +1577,8 @@ impl Editor {
             }
             Command::DeleteLine => self.delete_current_line(),
             Command::DeleteToEndOfLine => self.delete_to_end_of_line(),
+            Command::DuplicateLine => self.duplicate_line(),
+            Command::DuplicateLineUp => self.duplicate_line_up(),
             Command::ToggleGitDiff => {
                 self.view.show_git_diff = !self.view.show_git_diff;
                 self.message = if self.view.show_git_diff {
@@ -2656,15 +2666,72 @@ impl Editor {
         self.dirty = true;
     }
 
+    /// `Shift+Alt+Down`, `Ctrl+D`: duplicates the current line or selection down.
     fn duplicate_line(&mut self) {
-        let line = self.view.cursor_line;
-        let col = self.view.cursor_col;
-        let text = self.line_text(line);
-        let start = Pos::new(line, 0);
-        self.doc.edit(start, start, &format!("{text}\n"));
-        self.move_to(Pos::new(line + 1, col));
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        let first = from.line;
+        let last = if to.col == 0 && to.line > first {
+            to.line - 1
+        } else {
+            to.line
+        };
+
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        if !self.range_is_affordable(range_start, range_end) {
+            self.message = self.too_large(range_start, range_end);
+            return;
+        }
+
+        let count = last - first + 1;
+        let mut text = String::new();
+        for l in first..=last {
+            text.push_str(&self.line_text(l));
+            text.push('\n');
+        }
+
+        self.doc.edit(range_start, range_start, &text);
+
+        if let Some(anchor) = self.view.anchor {
+            let line = anchor.line + count;
+            let col = anchor.col.min(self.line_len(line));
+            self.view.anchor = Some(Pos::new(line, col));
+        }
+        self.view.cursor_line += count;
+        self.clamp_column();
         self.dirty = true;
         self.message.clear();
+        self.ensure_cursor_visible();
+    }
+
+    /// `Shift+Alt+Up`: duplicates the current line or selection up.
+    fn duplicate_line_up(&mut self) {
+        let (from, to) = self.selection().unwrap_or((self.cursor(), self.cursor()));
+        let first = from.line;
+        let last = if to.col == 0 && to.line > first {
+            to.line - 1
+        } else {
+            to.line
+        };
+
+        let range_start = Pos::new(first, 0);
+        let range_end = Pos::new(last, self.line_len(last));
+        if !self.range_is_affordable(range_start, range_end) {
+            self.message = self.too_large(range_start, range_end);
+            return;
+        }
+
+        let mut text = String::new();
+        for l in first..=last {
+            text.push_str(&self.line_text(l));
+            text.push('\n');
+        }
+
+        self.doc.edit(range_start, range_start, &text);
+
+        self.dirty = true;
+        self.message.clear();
+        self.ensure_cursor_visible();
     }
 
     /// `Alt+Up`: moves the current line or selection up one line.
@@ -4029,6 +4096,81 @@ mod tests {
         assert_eq!(line(&e, 0), "ab");
         assert_eq!(line(&e, 1), "ab");
         assert_eq!(line(&e, 2), "cd");
+        assert_eq!(e.view.cursor_line, 1);
+    }
+
+    #[test]
+    fn shift_alt_down_and_up_duplicate_line() {
+        let (mut e, _p) = editor_with("dup-keys.txt", b"alpha\nbeta\n");
+        e.view.cursor_line = 0;
+        e.view.cursor_col = 2;
+
+        // Shift+Alt+Down duplicates line 0 down, cursor moves to line 1
+        e.handle_key(KeyEvent::new(
+            KeyCode::Down,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(line(&e, 0), "alpha");
+        assert_eq!(line(&e, 1), "alpha");
+        assert_eq!(line(&e, 2), "beta");
+        assert_eq!(e.view.cursor_line, 1);
+        assert_eq!(e.view.cursor_col, 2);
+
+        // Shift+Alt+Up duplicates line 1 up, cursor stays on line 1 (the upper copy)
+        e.handle_key(KeyEvent::new(
+            KeyCode::Up,
+            KeyModifiers::ALT | KeyModifiers::SHIFT,
+        ));
+        assert_eq!(line(&e, 0), "alpha");
+        assert_eq!(line(&e, 1), "alpha");
+        assert_eq!(line(&e, 2), "alpha");
+        assert_eq!(line(&e, 3), "beta");
+        assert_eq!(e.view.cursor_line, 1);
+    }
+
+    #[test]
+    fn duplicate_selection_block_down_and_up() {
+        let (mut e, _p) = editor_with("dup-block.txt", b"first\nsecond\nthird\n");
+        // Select lines 0 and 1
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 6;
+
+        e.duplicate_line();
+        // Document should now have: first, second, first, second, third
+        assert_eq!(line(&e, 0), "first");
+        assert_eq!(line(&e, 1), "second");
+        assert_eq!(line(&e, 2), "first");
+        assert_eq!(line(&e, 3), "second");
+        assert_eq!(line(&e, 4), "third");
+        // Selection should have shifted to lines 2 and 3
+        assert_eq!(e.view.anchor, Some(Pos::new(2, 0)));
+        assert_eq!(e.view.cursor_line, 3);
+        assert_eq!(e.view.cursor_col, 6);
+
+        // Single undo step restores the document
+        e.undo();
+        assert_eq!(line(&e, 0), "first");
+        assert_eq!(line(&e, 1), "second");
+        assert_eq!(line(&e, 2), "third");
+        assert_eq!(e.doc.line_count(), 3);
+    }
+
+    #[test]
+    fn duplicate_line_commands_from_palette() {
+        let (mut e, _p) = editor_with("dup-cmd.txt", b"x\ny\n");
+        e.view.cursor_line = 0;
+        e.command(Command::DuplicateLine);
+        assert_eq!(line(&e, 0), "x");
+        assert_eq!(line(&e, 1), "x");
+        assert_eq!(line(&e, 2), "y");
+        assert_eq!(e.view.cursor_line, 1);
+
+        e.command(Command::DuplicateLineUp);
+        assert_eq!(line(&e, 0), "x");
+        assert_eq!(line(&e, 1), "x");
+        assert_eq!(line(&e, 2), "x");
+        assert_eq!(line(&e, 3), "y");
         assert_eq!(e.view.cursor_line, 1);
     }
 
