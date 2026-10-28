@@ -10,6 +10,7 @@ pub mod complete;
 pub mod config;
 pub mod doc;
 pub mod finder;
+pub mod git;
 pub mod highlight;
 pub mod indent;
 pub mod keys;

@@ -10,8 +10,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Paragraph, Widget};
 
+use std::collections::HashMap;
+
 use crate::doc::Doc;
 use crate::doc::edit::Pos;
+use crate::git::{DiffSign, GitGutterStyle};
 use crate::highlight::Highlighted;
 use crate::search::Pattern;
 use crate::theme::ThemeColors;
@@ -62,6 +65,10 @@ pub struct ViewState {
     pub highlight_pattern: Option<Pattern>,
     /// Whether the visual scrollbar is drawn at the right edge.
     pub show_scrollbar: bool,
+    /// Whether git diff signs are shown in the gutter.
+    pub show_git_diff: bool,
+    /// Visual style of the diff signs in the gutter.
+    pub git_gutter_style: GitGutterStyle,
 }
 
 impl Default for ViewState {
@@ -79,6 +86,8 @@ impl Default for ViewState {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         }
     }
 }
@@ -92,6 +101,8 @@ pub struct View<'a> {
     /// The highlighter works in the background, so this is empty until the
     /// colours arrive, and stays empty for a file with no syntax.
     pub highlight: Option<&'a Highlighted>,
+    /// Git diff signs indicating additions, modifications, and deletions.
+    pub diff_signs: Option<&'a HashMap<usize, DiffSign>>,
     /// The active theme's colors for editor canvas, cursor line, gutter, and chrome.
     pub theme: ThemeColors,
 }
@@ -103,6 +114,7 @@ impl<'a> View<'a> {
             doc,
             state,
             highlight: None,
+            diff_signs: None,
             theme: ThemeColors::default(),
         }
     }
@@ -619,7 +631,39 @@ impl Widget for View<'_> {
                         .bg(self.theme.gutter_bg)
                         .fg(self.theme.gutter_fg)
                 };
-                gutter_lines.push(Line::from(Span::styled(label, style)));
+
+                let sign_span = if !starts_line {
+                    Span::styled(
+                        "",
+                        Style::default().bg(if is_cursor {
+                            self.theme.line_highlight
+                        } else {
+                            self.theme.gutter_bg
+                        }),
+                    )
+                } else if self.state.show_git_diff {
+                    let bg = if is_cursor {
+                        self.theme.line_highlight
+                    } else {
+                        self.theme.gutter_bg
+                    };
+                    if let Some(sign) = self.diff_signs.and_then(|m| m.get(&(line_no as usize))) {
+                        let sym = sign.symbol(self.state.git_gutter_style);
+                        let fg = sign.color();
+                        Span::styled(sym, Style::default().fg(fg).bg(bg))
+                    } else {
+                        Span::styled(" ", Style::default().bg(bg))
+                    }
+                } else {
+                    let bg = if is_cursor {
+                        self.theme.line_highlight
+                    } else {
+                        self.theme.gutter_bg
+                    };
+                    Span::styled(" ", Style::default().bg(bg))
+                };
+
+                gutter_lines.push(Line::from(vec![Span::styled(label, style), sign_span]));
             }
 
             // Only the characters that can fit on screen are painted. A file
@@ -747,6 +791,7 @@ mod tests {
                     doc,
                     state,
                     highlight: None,
+                    diff_signs: None,
                     theme: ThemeColors::default(),
                 };
                 f.render_widget(view, f.area());
@@ -779,6 +824,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let text = frame_text(&doc, &state, 20, 4);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -811,6 +858,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("alpha"), "{text}");
@@ -833,6 +882,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("three"), "{text}");
@@ -855,6 +906,8 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 4)));
@@ -899,6 +952,8 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -922,6 +977,8 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -948,6 +1005,8 @@ mod tests {
             anchor: None,
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -984,6 +1043,8 @@ mod tests {
             anchor: Some(Pos::new(0, 6)),
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1023,6 +1084,8 @@ mod tests {
             anchor: None,
             highlight_pattern: Some(Pattern::compile("needle").expect("a valid pattern")),
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let view = View::new(&doc, &state);
         assert!(view.match_ranges(0, 20).is_empty());
@@ -1044,6 +1107,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 20, 3);
@@ -1068,6 +1133,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         }
     }
 
@@ -1199,6 +1266,7 @@ mod tests {
                     doc,
                     state,
                     highlight,
+                    diff_signs: None,
                     theme,
                 };
                 f.render_widget(view, f.area());
@@ -1221,6 +1289,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         }
     }
 
@@ -1262,6 +1332,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let text = frame_text(&doc, &state, 16, 5);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -1329,6 +1401,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1356,6 +1430,8 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1387,6 +1463,8 @@ mod tests {
             anchor: None,
             highlight_pattern: Some(Pattern::compile("beta").expect("a valid pattern")),
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1433,6 +1511,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1458,6 +1538,8 @@ mod tests {
             anchor: Some(Pos::new(0, 1)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1482,6 +1564,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let buffer = draw(&doc, &state, None);
         assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
@@ -1504,6 +1588,8 @@ mod tests {
             anchor: None,
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::MONOKAI);
         // Cursor line gets Monokai's #3e3d32
@@ -1531,6 +1617,8 @@ mod tests {
             anchor: Some(Pos::new(0, 0)),
             highlight_pattern: None,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::SOLARIZED_LIGHT);
         // Selection is dark navy #073642 on light theme
@@ -1548,6 +1636,8 @@ mod tests {
         let state = ViewState {
             top_line: 0,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
             ..ViewState::default()
         };
         let view = View::new(&doc, &state);
@@ -1565,6 +1655,8 @@ mod tests {
         let state = ViewState {
             top_line: 0,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
             show_line_numbers: false,
             ..ViewState::default()
         };
@@ -1597,6 +1689,8 @@ mod tests {
             top_line: 15,
             cursor_line: 15,
             show_scrollbar: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
             show_line_numbers: false,
             ..ViewState::default()
         };
@@ -1630,5 +1724,86 @@ mod tests {
         let view = View::new(&doc, &state);
         assert!(!view.show_scrollbar(5, 20));
         assert_eq!(view.scrollbar_width(5, 20), 0);
+    }
+
+    #[test]
+    fn diff_signs_render_in_gutter() {
+        let doc = doc_of("gutter-diff.txt", b"alpha\nbeta\ngamma\n");
+        let mut signs = HashMap::new();
+        signs.insert(0, DiffSign::Added);
+        signs.insert(1, DiffSign::Modified);
+        signs.insert(2, DiffSign::Deleted);
+
+        let state = ViewState {
+            top_line: 0,
+            show_line_numbers: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Bar,
+            ..ViewState::default()
+        };
+
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                    diff_signs: Some(&signs),
+                    theme: ThemeColors::default(),
+                };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Column 3 is the gutter sign column (gutter_width is 4)
+        assert_eq!(buffer[(3, 0)].symbol(), "▎");
+        assert_eq!(buffer[(3, 0)].fg, Color::Green);
+        assert_eq!(buffer[(3, 1)].symbol(), "▎");
+        assert_eq!(buffer[(3, 1)].fg, Color::Yellow);
+        assert_eq!(buffer[(3, 2)].symbol(), "▾");
+        assert_eq!(buffer[(3, 2)].fg, Color::Red);
+    }
+
+    #[test]
+    fn diff_signs_ascii_render_in_gutter() {
+        let doc = doc_of("gutter-ascii.txt", b"alpha\nbeta\ngamma\n");
+        let mut signs = HashMap::new();
+        signs.insert(0, DiffSign::Added);
+        signs.insert(1, DiffSign::Modified);
+        signs.insert(2, DiffSign::Deleted);
+
+        let state = ViewState {
+            top_line: 0,
+            show_line_numbers: true,
+            show_git_diff: true,
+            git_gutter_style: GitGutterStyle::Ascii,
+            ..ViewState::default()
+        };
+
+        let backend = TestBackend::new(20, 3);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View {
+                    doc: &doc,
+                    state: &state,
+                    highlight: None,
+                    diff_signs: Some(&signs),
+                    theme: ThemeColors::default(),
+                };
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(3, 0)].symbol(), "+");
+        assert_eq!(buffer[(3, 0)].fg, Color::Green);
+        assert_eq!(buffer[(3, 1)].symbol(), "~");
+        assert_eq!(buffer[(3, 1)].fg, Color::Yellow);
+        assert_eq!(buffer[(3, 2)].symbol(), "-");
+        assert_eq!(buffer[(3, 2)].fg, Color::Red);
     }
 }

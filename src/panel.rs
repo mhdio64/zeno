@@ -141,6 +141,16 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::DeleteToEndOfLine,
     },
     Entry {
+        keys: "",
+        label: "Toggle git diff signs",
+        command: Command::ToggleGitDiff,
+    },
+    Entry {
+        keys: "",
+        label: "Refresh git diff signs",
+        command: Command::RefreshGitDiff,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,

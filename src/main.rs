@@ -30,6 +30,7 @@ use zeno_cli::config::{self, Config};
 use zeno_cli::doc::edit::Pos;
 use zeno_cli::doc::{Doc, Snapshot, identity_of};
 use zeno_cli::finder::{self, FileFinder};
+use zeno_cli::git::GitState;
 use zeno_cli::highlight::Highlighter;
 use zeno_cli::indent::{self, IndentStyle};
 use zeno_cli::keys::Keymap;
@@ -570,6 +571,8 @@ struct Editor {
     completion: Option<Completion>,
     /// Whether to automatically trim trailing spaces and tabs from lines upon save.
     trim_trailing_whitespace: bool,
+    /// Git diff gutter tracking state.
+    git: GitState,
 }
 
 /// A panel that covers the document while it is open.
@@ -592,6 +595,7 @@ impl Editor {
         // The highlighter is started first: it works in the background, and
         // the editor paints plain text until the colours arrive.
         let highlight = Highlighter::start(&path);
+        let git = GitState::new(&path);
         Self {
             doc,
             path,
@@ -619,6 +623,7 @@ impl Editor {
             recent_files: RecentList::new(),
             completion: None,
             trim_trailing_whitespace: false,
+            git,
         }
     }
 
@@ -632,6 +637,8 @@ impl Editor {
         self.view.show_line_numbers = settings.line_numbers;
         self.view.show_relative_numbers = settings.relative_line_numbers;
         self.view.show_scrollbar = settings.scrollbar;
+        self.view.show_git_diff = settings.git_diff;
+        self.view.git_gutter_style = settings.git_gutter_style.parse().unwrap_or_default();
         self.trim_trailing_whitespace = settings.trim_trailing_whitespace;
         self.indent = indent::resolve(&self.path, &self.doc, settings);
         self.auto_pair = settings.auto_pair;
@@ -1545,6 +1552,19 @@ impl Editor {
             }
             Command::DeleteLine => self.delete_current_line(),
             Command::DeleteToEndOfLine => self.delete_to_end_of_line(),
+            Command::ToggleGitDiff => {
+                self.view.show_git_diff = !self.view.show_git_diff;
+                self.message = if self.view.show_git_diff {
+                    "git diff signs enabled"
+                } else {
+                    "git diff signs disabled"
+                }
+                .into();
+            }
+            Command::RefreshGitDiff => {
+                self.git.refresh();
+                self.message = "refreshed git signs".into();
+            }
         }
     }
 
@@ -3347,6 +3367,7 @@ impl Editor {
                     &self.path,
                     self.highlight.theme().map(str::to_owned),
                 );
+                self.git = GitState::new(&self.path);
                 self.message = format!("wrote {}", self.path.display());
             }
             Err(e) => self.message = format!("save failed: {e}"),
@@ -3362,6 +3383,7 @@ impl Editor {
                 if let Ok(identity) = identity_of(&self.path) {
                     self.doc.set_identity(identity);
                 }
+                self.git.refresh();
                 self.message = format!("wrote {}", self.path.display());
             }
             Err(e) => self.message = format!("save failed: {e}"),
@@ -3458,6 +3480,7 @@ impl Editor {
                     &self.path,
                     self.highlight.theme().map(str::to_owned),
                 );
+                self.git = GitState::new(&self.path);
                 self.message = format!("opened {}", self.path.display());
             }
             Err(e) => {
@@ -3542,6 +3565,7 @@ impl Editor {
         // for here, so that the frame is painted with the colours that
         // belong to the text on screen.
         self.poll_highlight(body.height);
+        self.git.update(&self.doc);
 
         terminal.draw(|f| {
             let theme_colors = self.highlight.theme_colors();
@@ -3576,6 +3600,7 @@ impl Editor {
                         doc: &self.doc,
                         state: &self.view,
                         highlight: Some(self.highlight.lines()),
+                        diff_signs: Some(&self.git.signs),
                         theme: theme_colors,
                     };
                     let cursor = view.cursor_position(body);
@@ -6522,5 +6547,59 @@ trim_trailing_whitespace = true
         assert_eq!(line(&e, 0), "while babies < 100:");
         assert_eq!(line(&e, 1), "    print (babies)");
         assert_eq!(line(&e, 2), "    parents = 1");
+    }
+
+    #[test]
+    fn git_diff_toggle_command_toggles_and_reports_message() {
+        let (mut e, _p) = editor_with("git-toggle.txt", b"hello\n");
+        assert!(e.view.show_git_diff);
+        e.command(Command::ToggleGitDiff);
+        assert!(!e.view.show_git_diff);
+        assert_eq!(e.message, "git diff signs disabled");
+        e.command(Command::ToggleGitDiff);
+        assert!(e.view.show_git_diff);
+        assert_eq!(e.message, "git diff signs enabled");
+    }
+
+    #[test]
+    fn git_diff_refresh_command_reloads_baseline() {
+        let (mut e, _p) = editor_with("git-refresh.txt", b"hello\n");
+        e.command(Command::RefreshGitDiff);
+        assert_eq!(e.message, "refreshed git signs");
+    }
+
+    #[test]
+    fn git_state_updates_diff_signs_on_edit_in_memory() {
+        let (mut e, _p) = editor_with("git-diff-edit.txt", b"line 1\nline 2\nline 3\n");
+        // Set an in-memory baseline
+        let base = vec![
+            zeno_cli::git::hash_line("line 1"),
+            zeno_cli::git::hash_line("line 2"),
+            zeno_cli::git::hash_line("line 3"),
+        ];
+        e.git.base_lines = Some(std::sync::Arc::new(base));
+        e.git.signs_version = 0;
+        e.git.update(&e.doc);
+        assert!(
+            e.git.signs.is_empty(),
+            "clean doc should have no diff signs"
+        );
+
+        // Now modify line 2
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 6;
+        e.doc.edit(Pos::new(1, 4), Pos::new(1, 6), "two");
+        e.doc.index_fully();
+        e.git.update(&e.doc);
+        assert_eq!(
+            e.git.signs.get(&1),
+            Some(&zeno_cli::git::DiffSign::Modified)
+        );
+
+        // Now undo the edit
+        e.doc.undo();
+        e.doc.index_fully();
+        e.git.update(&e.doc);
+        assert!(e.git.signs.is_empty(), "undo back to baseline clears signs");
     }
 }

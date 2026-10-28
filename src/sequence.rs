@@ -52,6 +52,10 @@ pub enum Command {
     DeleteLine,
     /// Deletes from the cursor to the end of the line (`Ctrl+Alt+K`).
     DeleteToEndOfLine,
+    /// Toggles git diff gutter signs.
+    ToggleGitDiff,
+    /// Refreshes git diff gutter signs from git HEAD.
+    RefreshGitDiff,
     /// The help list (`Leader ?`).
     Help,
     /// The command palette (`F1`, `Leader p`).
@@ -90,6 +94,8 @@ impl Command {
             Command::TrimTrailingWhitespace => "trim_trailing_whitespace",
             Command::DeleteLine => "delete_line",
             Command::DeleteToEndOfLine => "delete_to_end_of_line",
+            Command::ToggleGitDiff => "toggle_git_diff",
+            Command::RefreshGitDiff => "refresh_git_diff",
             Command::Help => "help",
             Command::Palette => "palette",
         }
@@ -142,6 +148,8 @@ impl Command {
             }
             "delete_line" | "cut_line" | "kill_line" => Command::DeleteLine,
             "delete_to_end_of_line" | "delete_to_eol" | "kill_to_end" => Command::DeleteToEndOfLine,
+            "toggle_git_diff" | "toggle_git_gutter" | "git_diff" => Command::ToggleGitDiff,
+            "refresh_git_diff" | "refresh_git" | "git_refresh" => Command::RefreshGitDiff,
             "help" => Command::Help,
             "palette" | "command_palette" => Command::Palette,
             _ => return None,
@@ -569,6 +577,8 @@ mod tests {
             Command::TrimTrailingWhitespace,
             Command::DeleteLine,
             Command::DeleteToEndOfLine,
+            Command::ToggleGitDiff,
+            Command::RefreshGitDiff,
             Command::Help,
             Command::Palette,
         ] {

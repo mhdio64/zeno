@@ -33,6 +33,10 @@ pub struct Settings {
     pub scrollbar: bool,
     /// Automatically trim trailing spaces and tabs from lines upon save.
     pub trim_trailing_whitespace: bool,
+    /// Whether git diff gutter signs are shown.
+    pub git_diff: bool,
+    /// Visual style of git diff gutter symbols ("bar" or "ascii").
+    pub git_gutter_style: String,
 }
 
 impl Default for Settings {
@@ -47,6 +51,8 @@ impl Default for Settings {
             theme: None,
             scrollbar: true,
             trim_trailing_whitespace: false,
+            git_diff: true,
+            git_gutter_style: "bar".to_string(),
         }
     }
 }
@@ -218,6 +224,13 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "autosave" => set_bool(&mut settings.autosave, value),
         "scrollbar" => set_bool(&mut settings.scrollbar, value),
         "trim_trailing_whitespace" => set_bool(&mut settings.trim_trailing_whitespace, value),
+        "git_diff" | "git_gutter" => set_bool(&mut settings.git_diff, value),
+        "git_gutter_style" => {
+            let trimmed = value.trim().trim_matches('"');
+            if !trimmed.is_empty() {
+                settings.git_gutter_style = trimmed.to_owned();
+            }
+        }
         "theme" => {
             let trimmed = value.trim();
             if !trimmed.is_empty() {
@@ -557,6 +570,14 @@ leader = "ctrl+space"
         assert_eq!(config2.settings.theme.as_deref(), Some("Monokai"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn git_diff_and_gutter_style_settings_are_read() {
+        let text = "[settings]\ngit_diff = false\ngit_gutter_style = \"ascii\"\n";
+        let config = parse(text);
+        assert!(!config.git_diff);
+        assert_eq!(config.git_gutter_style, "ascii");
     }
 
     impl Settings {
