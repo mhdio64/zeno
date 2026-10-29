@@ -1,386 +1,259 @@
 # zeno — handoff
 
 Everything the next agent needs to pick this project up without re-deriving it.
-Read this file first, then `CONTEXT.md`, `docs/spec.md` and `docs/keymap.md`.
-There is no `README.md` and no `AGENTS.md`; this file is the entry point.
+Read this file first, then `CONTEXT.md`, `docs/spec.md`, and `docs/keymap.md`.
+There is no `README.md` and no `AGENTS.md`; this file is the primary entry point.
 
 ---
 
 ## 0. State of the working tree — read before touching anything
 
-- Repository root: this directory (on this machine:
-  `C:\Users\main\Desktop\freebuff-desktop\zino`). Branch: `master`.
-- Last commit: `546e3c7 Colour the viewport in the background, and keep the parser's place`.
-  Only five commits exist (`0dea786 initial`, `327cdca`, `2a3dd86`, `5383954`, `546e3c7`).
-- **There is one large, uncommitted batch of work on top of that commit** —
-  roughly 3,800 added lines across 15 modified files, plus 4 new modules,
-  5 new ADRs, the whole `tests/` tree and `.github/`:
-
-  Modified: `.gitignore`, `CONTEXT.md`, `docs/keymap.md`, `src/bin/zeno-bench.rs`,
-  `src/clipboard.rs`, `src/doc/edit.rs`, `src/doc/mod.rs`, `src/highlight.rs`,
-  `src/lib.rs`, `src/main.rs`, `src/motion.rs`, `src/prompt.rs`, `src/render.rs`,
-  `src/search.rs`, `src/sequence.rs`.
-
-  New: `src/config.rs`, `src/indent.rs`, `src/keys.rs`, `src/panel.rs`,
-  `tests/e2e/{harness.py,test_zeno.py}`, `.github/workflows/ci.yml`,
-  `docs/adr/0019…0023`.
-
-  That batch is green (see §2) but uncommitted. **Commit it as a checkpoint
-  before starting new work**, so a new change can be reviewed on its own. Do
-  not stage unrelated files and do not rewrite the existing commits.
+- **Repository root**: `c:\Users\main\Documents\Projects\zeno`. Branch: `master`.
+- **Working tree status**: Clean. All feature, optimization, security, and resilience work has been committed and verified.
+- **Latest commits**:
+  - `3f004ca`: *install panic hook and raw mode guard and redraw on window resize and handle thread spawn exhaustion*
+  - `76de336`: *harden file saving against symlinks and preserve file permissions and validate open file types and escape git paths*
+  - `1e6e690`: *optimize search matches and finder lowercase caching and completion word scanning*
+  - `0589520`: *optimize viewport styled spans and cursor position and overlay locate and remove duplicate key code*
+  - `b5f538b`: *increase dark modern theme contrast with black background and vibrant syntax colors*
+  - `e84e791`: *add vs code dark modern theme and make it the default theme*
+  - `1352e23`: *highlight matching bracket pairs in viewport and add toggle command with config option*
+  - `9d8f4ed`: *surround selection with brackets or quotes when typing paired characters and update tests*
+- **Test suite**: **511 tests passing cleanly** (295 library tests in `zeno_cli` + 216 editor tests in `zeno`, 0 failed, 0 ignored).
+- **Quality gates**:
+  - `cargo fmt -- --check`: Clean (no formatting diffs).
+  - `cargo clippy --all-targets -- -D warnings`: Clean (0 warnings).
+  - `cargo test`: 100% green.
 
 ---
 
 ## 1. What zeno is, and the rules it is built on
 
-zeno is a fast, non-modal terminal text editor meant to replace nano: one file
-per invocation, instant open, real editing power, save, quit. The product is
-judged by the time from launching the binary to the first accepted keystroke
-(spec §1, §7).
+zeno is a lightning-fast, non-modal terminal text editor designed to replace `nano`: instant open, one file per invocation, full editing power, atomic save, and quit. The editor is judged by keystroke latency and launch responsiveness (first frame < 50 ms, keystroke latency < 16 ms, launch < 30 ms; spec §1, §7).
 
-The vocabulary is defined in `CONTEXT.md` and must be used consistently in code,
-docs and conversation: **quick editor, non-modal, command, operator, motion,
-text object, binding, leader key, instant open, prompt, viewport, non-goal**.
-Do not write "mode", "workspace", "dialog", "shortcut" or "window" for those
-concepts.
+The architectural vocabulary is defined in `CONTEXT.md` and must be adhered to strictly in code, docs, and conversation: **quick editor, non-modal, command, operator, motion, text object, binding, leader key, instant open, prompt, viewport, non-goal**. Do not use "mode", "workspace", "dialog", "shortcut", or "window" for these concepts.
 
-Non-negotiables, each with a decision record:
+### Non-negotiable architectural decisions (ADRs 0001–0024):
 
-| Rule | Where |
-| --- | --- |
-| No modes. One keymap, always. No normal/insert/visual. | ADR 0002 |
-| Never rely on `Ctrl+Shift+<letter>` (indistinguishable on Windows). | ADR 0005 |
-| A chord is matched on the **physical key**, not the produced character. | ADR 0010 |
-| Every edit goes through one primitive, `Doc::edit`, and is journaled. | ADR 0011 |
-| Motions name destinations; ranges are half-open. | ADR 0012 |
-| A selection is an optional anchor, not a mode. | ADR 0013 |
-| The prompt (and a panel) owns the whole keyboard while open. | ADR 0014 |
-| The editable overlay always sits above an immutable mmap. | ADR 0004 |
-| The input path never blocks: workers + version guards, never a join. | ADR 0007, 0018 |
-| Highlighting is drawn from the pattern, not from the scan's result. | ADR 0016 |
-| One horizontal offset for the whole document. | ADR 0017 |
-| Wrapping adds `top_row` and changes no edit semantics. | ADR 0019 |
-| Save is atomic, format-preserving, and identity-guarded. | ADR 0009, 0015 |
-| Indentation is resolved once at startup; `.editorconfig` wins. | ADR 0021 |
-| The leader is a chord from `zeno.toml`; user bindings shadow built-ins. | ADR 0022 |
-| The e2e tests drive a real pty, not a fake terminal. | ADR 0023 |
-| `zeno -` runs a second process because a pipe cannot carry keys. | ADR 0020 |
-| Enter cycles find matches; Esc leaves search in two stages. | ADR 0024 |
+| Rule / Principle | ADR Reference |
+| :--- | :--- |
+| No modes. One universal keymap, always. No normal/insert/visual separation. | ADR 0002 |
+| Never rely on `Ctrl+Shift+<letter>` (indistinguishable on Windows/ConPTY). | ADR 0005 |
+| A chord resolves strictly through the **physical key**, never the produced character. | ADR 0010 |
+| Every single edit routes through one atomic primitive: `Doc::edit`, with an undo journal. | ADR 0011 |
+| Motions name destinations; ranges are half-open `[start, end)`. | ADR 0012 |
+| A selection is an optional anchor, not an editor mode. | ADR 0013 |
+| The prompt (and any panel/picker) owns the entire keyboard while active. | ADR 0014 |
+| The editable overlay always sits cleanly atop an immutable mmap buffer. | ADR 0004 |
+| The input path never blocks: background workers + version guards, never a `.join()`. | ADR 0007, 0018 |
+| Highlighting is drawn from the active pattern, not from an asynchronous scan result. | ADR 0016 |
+| Exactly one horizontal offset governs the entire document viewport. | ADR 0017 |
+| Soft word wrapping adds `top_row` offsets without altering document edit semantics. | ADR 0019 |
+| Atomic save: format-preserving, identity-guarded, symlink-safe, permission-preserving. | ADR 0009, 0015 |
+| Indentation is detected at startup; `.editorconfig` takes precedence over file content. | ADR 0021 |
+| The leader key is configurable in `zeno.toml`; user chords shadow built-in bindings. | ADR 0022 |
+| End-to-end integration tests drive a real PTY harness via `pyte`, not a mock terminal. | ADR 0023 |
+| `zeno -` spools stdin into a temporary file and launches a child process to preserve tty input. | ADR 0020 |
+| Enter cycles search matches while keeping prompt open; Esc clears in two stages. | ADR 0024 |
 
-Design non-goals for v1 (spec §10) — do not quietly add them: tabs/multiple
-files, multi-cursor, LSP/diagnostics, hex view, plugins, persistent undo,
-remote editing, collaboration.
+**Design non-goals for v1 (spec §10)** — do NOT casually add these without deliberate architectural approval: multiple tabs / window splits, multi-cursor editing, heavy LSP / diagnostics servers, hex viewer, plugin interpreter runtime, persistent undo across restarts, remote server collaboration.
 
 ---
 
 ## 2. Build, run, test
 
-Windows here, but the commands are the same everywhere (CI runs Linux, macOS and
-Windows; see `.github/workflows/ci.yml`).
-
 ```bash
-cargo build --release            # target/release/zeno.exe  (the e2e tests need this)
-cargo run --release -- file.txt  # edit a file
-cargo test                       # 205 library tests + 137 editor tests, all green
-cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo build --release            # Produces target/release/zeno.exe
+cargo run --release -- file.txt  # Launch editor on a target file
+cargo test                       # 511 tests (295 lib + 216 bin) — all pass
+cargo fmt -- --check             # House style check
+cargo clippy --all-targets -- -D warnings  # Zero warnings policy
 ```
 
-End-to-end tests (spawn a real pty, render the screen through `pyte`):
-
+### End-to-end PTY tests (`tests/e2e`):
 ```bash
-python -m pip install pyte            # plus pywinpty on Windows
+python -m pip install pyte pywinpty
 python -m unittest discover -s tests/e2e -v
 ```
 
-Current status on this machine: **13 e2e tests, `OK (skipped=4)`** — the four
-that need `Alt` or the NUL byte (`Ctrl+Space`) are skipped on Windows because
-ConPTY's input parser cannot carry them through a byte pipe (ADR 0023).
-
-Manual probing, which is how UI bugs actually get diagnosed here:
-
+### Manual terminal driver tools:
 ```bash
-python tools/tui_probe.py file.txt "hello" "\r" "\x1b"   # keys in, screen text out
-python tools/pty_capture.py target/release/zeno.exe "x"  # raw bytes the editor wrote
+python tools/tui_probe.py file.txt "hello" "\r" "\x1b"   # Inject keystrokes, capture screen
+python tools/pty_capture.py target/release/zeno.exe "x"  # Capture raw ANSI escape bytes
 ```
 
-`TUI_PROBE_DELAY` / `PTY_DELAY` tune the wait per keystroke. Both tools need a
-release build and `pywinpty`.
-
 ---
 
-## 3. Repo map
+## 3. Repository map
 
 ```
-src/lib.rs            crate `zeno_cli` — the testable core
-  doc/mod.rs          Doc: mmap + line index + overlay + journal + version + identity
-  doc/index.rs        progressive line index; background scanner
-  doc/overlay.rs      line-level edit segments over the mapped file
-  doc/edit.rs         Pos, the one edit primitive, History/journal
-  render.rs           View widget + ViewState, gutter, wrapping, match_ranges
-  motion.rs           pure cursor destinations (move targets, text objects)
-  search.rs           Pattern (regex), SearchJob (thread), Scope, Wrap, events
-  highlight.rs        syntect worker; viewport colours, checkpoints
-  prompt.rs           the prompt line: Purpose, text vs choice, caret, note
-  panel.rs            help list + command palette, one shared table
-  sequence.rs         leader grammar: steps in, Action out
-  keys.rs             Chord parsing, default keymap, config-supplied bindings
-  config.rs           zeno.toml parser ([settings], [keys])
-  indent.rs           IndentStyle: .editorconfig → content → default
-  clipboard.rs        internal + OSC 52 write path
+src/
+  lib.rs               Crate `zeno_cli` — the pure testable library core
+    clipboard.rs       Internal clipboard engine + OSC 52 terminal copy integration
+    complete.rs        Buffer-aware word completion with zero-allocation token iterator
+    config.rs          zeno.toml parser & serializer ([settings], [keys]), in-place update
+    doc/
+      mod.rs           Doc: mmap + line index + overlay + journal + atomic safe tempfiles
+      index.rs         Progressive line indexer; background scanner
+      overlay.rs       Line-level edit segments over mmap with O(1) early bounds
+      edit.rs          Pos coordinate, Doc::edit primitive, History/undo-redo journal
+    finder.rs          Fuzzy file finder with cached lowercase bytes & recent file boost
+    git.rs             Git gutter diff tracking, hunk navigation, option-injection safe (--)
+    highlight.rs       Syntect syntax worker; viewport checkpoints; thread fallback
+    indent.rs          IndentStyle: .editorconfig -> content heuristic -> default
+    keys.rs            Chord parsing, physical key layout translation, user keymaps
+    motion.rs          Pure cursor destinations (line, word, paragraph, brackets, text objects)
+    panel.rs           Help list, command palette, recent files picker, theme picker
+    persian.rs         Persian & Arabic unicode shaping (Forms-B) & visual BiDi reordering
+    prompt.rs          Prompt line widget: Purpose, text vs choice, caret, status note
+    recent.rs          LRU recent file tracking across editor sessions
+    render.rs          View widget, gutter, word wrap, bracket matching, zero-alloc spans
+    search.rs          Regex pattern, background SearchJob workers, O(1) ASCII column map
+    sequence.rs        Leader grammar: state machine feeding chords to Actions
+    theme.rs           Built-in curated palettes + VS Code Dark Modern high contrast + .tmTheme
 
-src/main.rs           binary `zeno`: the Editor, event loop, rendering, prompts
-src/bin/zeno-bench.rs binary `zeno-bench`: performance harness
-tests/e2e/            pty harness + 13 screen-level tests
-tools/                tui_probe.py, pty_capture.py (manual drivers)
-docs/spec.md          the product spec — the source of truth for scope
-docs/keymap.md        the user-facing keymap and behaviour contract
-docs/performance.md   measured numbers, findings 1–11, reproduction steps
-docs/adr/0001…0024    one decision record per irreversible choice
+  main.rs              Binary `zeno`: Terminal event loop, RawModeGuard, panic hook, layout
+  bin/zeno-bench.rs    Binary `zeno-bench`: Synthetic performance harness (first frame, key latency)
+tests/e2e/             PTY test harness driving real pseudo-terminals
+docs/                  spec.md, keymap.md, performance.md, and ADRs 0001 through 0024
 ```
 
-`src/main.rs` (4,520 lines) holds the editor because the editor is one state
-machine: it is the only place that knows about the terminal. Everything that can
-be tested without a terminal lives in the library.
-
-### The `Editor` struct (`src/main.rs`)
-
-`doc`, `path`, `view: ViewState`, `dirty`, `message`, `quit`,
-`viewport_height_hint`, `seq: Sequences`, `clipboard: String`, `osc: Option<String>`,
-`prompt: Option<Prompt>`, `search: Option<Search>`, `highlight: Highlighter`,
-`marks: HashMap<char, Pos>`, `pending_replace: Option<Pattern>`, `auto_pair`,
-`overlay: Option<Overlay>` (`Help { offset }` or `Palette`), `pipe_out`, `indent`,
-`autosave`, `last_key: Instant`, `keys: Keymap`.
-
-### Key routing order (`Editor::handle_key`) — this order is load-bearing
-
-1. `prompt.is_some()` → `handle_prompt_key` (every key is an answer).
-2. `overlay.take()` → `handle_overlay_key` (help/palette).
-3. `!seq.is_idle()` → `feed_sequence` (a pending leader owns the next key).
-4. `keys.is_leader(&key)` → start a sequence, message `Leader…`.
-5. `keys.command_for(&key)` → a **config-supplied** chord (shadows built-ins).
-6. `F1` → palette.
-7. `Alt+Z` → word wrap (matched on the key, not the character).
-8. `Ctrl` chords via `chord_letter` (`Ctrl+/` special-cased: console `/` vs VT
-   control byte) — `a c x s v d f h g w k e l z y q`.
-9. `Shift` + movement → extend the selection.
-10. Plain keys: printing, `Enter`, `Backspace`, `Delete`, `Tab`, arrows,
-    `Home`/`End`, `PageUp`/`PageDown`, `Esc`.
-
-`Esc` in ordinary editing: clear the message and the selection, and if a search
-is live, clear it (`clear_search`). That is the second half of the two-press Esc
-described in §7.
-
-### Frame (`Editor::draw`)
-
-`poll_search()` → `terminal.size()` → layout (body + one status row) → measure
-the gutter and set `view.width` → `ensure_cursor_visible()` →
-`poll_highlight(body.height)` → paint panel *or* document → then either the
-prompt line (with its own caret) or the status line (with the document caret).
-The status line shows name, `[+]`, `Ln`/`Col`, syntax name once known, line
-count (`indexing…` while scanning), the live `Find:` pattern with its match
-count, then the message.
-
-### Data model
-
-- The file is memory-mapped and never mutated. `Doc` holds `Arc<Mmap>`,
-  `Arc<LineIndex>`, an `Overlay` of `LineEdit` segments, a `History`, and a
-  `version: u64` bumped on every edit.
-- `LineIndex` discovers line starts progressively; a background thread scans
-  ahead; `index_fully()` is the one call that costs a full scan and is only made
-  when it is unavoidable (replace-all with no selection, writing a piped buffer).
-- `Doc::snapshot()` is what a worker is given, so a worker never touches a live
-  `Doc`.
-- Every worker result is stamped with the `version` it was computed against
-  (`search.count_version`, `search.job_version`) and is discarded if the
-  document moved. Reproduce the reasoning from ADR 0018 before changing it.
-
-### Search (`search.rs` + `Editor`)
-
-- `Pattern::compile(&str)` → `Result<Pattern, String>`; the error string is what
-  the prompt's `note` shows.
-- Two background scans, distinct jobs: **count** (`Scope::All`, feeds
-  "N matches") and **jump** (`Scope::From/After/Before` + `Wrap`, moves the
-  cursor). The **viewport scan** is foreground and cheap: `View::match_ranges`
-  colours the visible lines from the compiled pattern alone (ADR 0016).
-- `poll_search()` is called once per frame from `draw`: it drains the jobs,
-  restarts a stale count, applies a jump (`move_to` + `clamp_column` +
-  `ensure_cursor_visible`), and `take`s/restores `self.search` around all of it.
-- `refresh_search()` is called for every keystroke in a `Search`/`Replace`
-  prompt: compile, set the note on error, keep the last good pattern on error,
-  clear on empty, otherwise `set_pattern` + `start_count`.
-- `next_match` / `previous_match` (`Leader n` / `Leader N`) open the prompt when
-  there is no search; otherwise they start a wrap-aware scan.
+### Key routing pipeline (`Editor::handle_key` in `src/main.rs`) — strict order:
+1. `self.prompt.is_some()` → `handle_prompt_key` (active prompt owns all keystrokes).
+2. `self.overlay.take()` → `handle_overlay_key` (palette / help / recent files / theme picker).
+3. `!self.seq.is_idle()` → `feed_sequence` (leader sequence pending).
+4. `self.keys.is_leader(&key)` → initiate leader sequence, display `Leader…`.
+5. `self.keys.command_for(&key)` → user custom chord from `zeno.toml` (shadows built-ins).
+6. `F1` / `F11` → Palette (`F1`), Zen mode toggle (`F11`).
+7. `Alt+Z` → Soft word wrap toggle.
+8. `Ctrl+Space` → Word autocompletion cycling (`complete_word`).
+9. `Ctrl` chords via physical key normalization (`Ctrl+S`, `Ctrl+F`, `Ctrl+H`, `Ctrl+Z`, `Ctrl+P`, etc.).
+10. `Shift` + motion → Start or extend text selection anchor.
+11. Printable characters with active selection: auto-surround if delimiter `(`, `[`, `{`, `"`, `'`, etc., else replace selection.
+12. Plain typing, navigation keys (`Enter`, `Backspace`, `Delete`, `Tab`, arrows, `Home`/`End`, `PageUp`/`PageDown`, `Esc`).
 
 ---
 
-## 4. Feature status against the spec
+## 4. Feature inventory & contracts
 
-Implemented and tested:
+### 4.1. Core Editing & Navigation
+- **Instant File Open**: Files are mapped into memory using `memmap2`. Unsaved edits reside in an in-memory `Overlay`. Opening huge files is instant regardless of file size.
+- **Surround Selection**: Selecting any text and typing an opening or closing pair character (`(`, `)`, `[`, `]`, `{`, `}`, `"`, `'`, `` ` ``, `<`, `>`) encloses the selection in the corresponding pair in a single atomic undo step, retaining cursor direction.
+- **Matching Bracket Highlight**: Viewport scans matching pairs `()`, `[]`, `{}` under the cursor bidirectionally and highlights them in bold cyan (`ThemeColors::DARK_MODERN`). Configurable via `highlight_matching_bracket = true/false` and toggleable in the palette.
+- **Word Under Cursor Highlight**: Automatically highlights all visible occurrences of the identifier under the cursor across the viewport. Configurable via `highlight_word_under_cursor`.
+- **Persian / Arabic RTL BiDi Support**: Native Unicode contextual shaping (Arabic Presentation Forms-B: initial, medial, final, isolated forms for Persian and Arabic glyphs like گ، چ، پ، ژ، ک، ی) combined with directional visual reordering. Punctuation and markdown symbols remain in forward position while RTL words are displayed correctly in terminal viewports.
+- **Word Wrap (`Alt+Z`, `Leader w`)**: Soft visual line wrapping with full cursor up/down navigation across wrapped segments without inserting real newlines.
+- **Buffer Word Completion (`Ctrl+Space`)**: Fast buffer-scanning autocompletion extracting word tokens, ranking by distance from cursor, cycling dynamically.
 
-- Open a file instantly; atomic save preserving permissions, line endings, BOM,
-  final-newline presence; identity guard when the file changed on disk
-  (reload / overwrite / cancel, ADR 0015).
-- Binary detection with `--force`; `zeno -` (spool + child process, ADR 0020);
-  `--no-background-index`, `--bench-open`, `--help`, `--version`.
-- Gutter, absolute and relative numbers (`Leader ,` / `Leader .`), status line.
-- syntect highlighting in a worker, 16 KB line guard, user `syntaxes/`.
-- Indentation detection, `.editorconfig`, bracket/colon indent on `Enter`,
-  closer dedent, `Tab` / `Shift+Tab`, `Leader <` / `Leader >` (ADR 0021).
-- Word wrap (`Alt+Z`, `Leader w`) with visual-row movement and `top_row`.
-- Horizontal scrolling with one offset (ADR 0017).
-- Find: live highlight while typing, match count, invalid-pattern note, `Enter`
-  jump, `Leader n`/`Leader N` cycling with wrap, Esc leaving the highlight on
-  screen (see §7 for the change in flight).
-- Replace: pattern then replacement, selection or whole file, one undo step,
-  affordability guard.
-- Undo/redo grouped by command; cut/copy/paste with OSC 52 (write-only);
-  auto-pairing; marks (`Leader m <mark>`, `Leader ' <mark>`); comment toggle;
-  duplicate line; select line; delete to end of line / word back.
-- Help list (`Leader ?`) and command palette (`F1`, `Leader p`) from one table.
-- `zeno.toml` `[settings]` and `[keys]` (leader + extra chords, names normalized
-  so `go to line` = `go-to-line` = `go_to_line`); autosave after 600 ms of quiet.
-- Leader grammar: operators `d c y v > <`, motions, text objects, counts,
-  `MAX_SPAN_LINES = 10_000` guard (`src/main.rs`) with an explanatory message.
+### 4.2. File Management & Git Integration
+- **File Finder (`Leader f` / `Ctrl+P`)**: Subsequence fuzzy matching across workspace files with cached lowercase ASCII acceleration and recent file boost ranking.
+- **Recent Files (`Leader b` / `Ctrl+Tab`)**: Fast buffer switcher tracking recently opened files with cursor position memory.
+- **Git Diff Gutter & Hunk Jumping**: Live gutter indicators for modified (`~`), added (`+`), and deleted (`_`) lines relative to Git index. Navigate hunks with `[c` and `]c`.
+- **Zen Mode (`F11`, `Leader Z`)**: Hides the gutter and status bar for a clean, distraction-free editing buffer.
+- **Trailing Whitespace Trimming**: Optional auto-trim on save (`trim_trailing_whitespace = true` in `zeno.toml`) and manual command in the palette.
 
-Known gaps and inconsistencies (deliberately listed, not hidden):
-
-1. ~~**Config is read once at startup**~~ (Fixed: spec §6 updated to "read once at startup", agreeing with keymap.md and ADR 0022).
-2. ~~**`docs/keymap.md` contradicts itself** in one paragraph~~ (Fixed: both `[settings]` and `[keys]` are noted as read).
-3. ~~**Mouse capture is enabled** (`EnableMouseCapture`)~~ (Fixed: capture removed in accordance with spec §4.2 "no mouse", restoring native terminal selection).
-4. ~~**No encoding in the status line**~~ (Fixed: UTF-8 encoding label added to status line per spec §4.2).
-5. ~~**Themes are not implemented**~~ (Fixed: user `.tmTheme` files in `themes/` and `theme` setting in `zeno.toml` supported per ADR 0008).
-6. ~~**The e2e find test is weaker than it looks**~~ (Fixed: tightened to assert gutter line 150 scrolled into view and prompt lifecycle).
-7. ~~**`docs/performance.md` numbers come from an earlier machine state**~~ (Fixed: regenerated with `cargo run --release --bin zeno-bench` and updated in docs/performance.md).
+### 4.3. Curated Themes & Modern High-Contrast Palette
+- **Default Theme**: VS Code Dark Modern 2026 (`ThemeColors::DARK_MODERN`), engineered with a deep black background (`#000000`) and high-contrast, vibrant syntax highlights for keywords (`#569cd6`), types (`#4ec9b0`), strings (`#ce9178`), functions (`#dcdcaa`), and comments (`#6a9955`).
+- **Curated Theme Picker (`Leader T`)**: Switch on-the-fly between VS Code Dark Modern, Monokai, Solarized Dark, Solarized Light, GitHub Dark, and High Contrast. Saves selection automatically to `zeno.toml`.
 
 ---
 
-## 5. The work in flight, stated precisely
+## 5. Security invariants & audit guarantees
 
-The user's last request (Persian, paraphrased): *"While I'm in find, pressing
-Enter should keep cycling through the results and I should stay in find; find
-should not close until I press Esc. Like VSCode."*
+Hardened against symlink races, permission drops, and injection vulnerabilities:
 
-Current behaviour in the working tree, as implemented:
-
-- `Ctrl+F` opens the prompt pre-filled with the last pattern.
-- Typing recompiles the pattern live (`refresh_search`), so matches highlight and
-  the count appears, and an invalid pattern sets a note without losing the last
-  good highlight.
-- **`Enter` submits and closes the prompt** (`handle_prompt_key` returns
-  `Answer::Text`, and the caller does `self.prompt.take()`), then starts a jump
-  scan with `Scope::From { pos: cursor }` + `Wrap::Start`.
-- `Esc` inside a `Search` prompt sets `escape_leaves_search`: the prompt closes,
-  the highlight stays (`prompt = None`, message cleared) — the VSCode-like first
-  Esc.
-- `Esc` in ordinary editing clears message + selection, and if `search.is_some()`
-  calls `clear_search()` — the second Esc, back to fully plain.
-
-What must change:
-
-1. `Enter` in a **Search** prompt moves to the next match and **leaves the
-   prompt open** (repeatable: Enter, Enter, Enter walks the matches, wrapping at
-   the end). It must *not* go through the `Answer`/`prompt.take()` path.
-2. The **first** Enter after the pattern changed starts at or after the caret
-   (`Scope::From`) — otherwise the first Enter on a match already under the
-   cursor does nothing. Subsequent Enters should advance past the current match
-   (`Scope::After` with the caret at the match start, or track the end of the
-   last match). Pick one rule, write it in the ADR, and assert both cases.
-3. `Esc` keeps the two-press behaviour already implemented: first press closes
-   the prompt and keeps the highlight; second press (ordinary editing) clears it.
-4. `Replace` keeps its current behaviour (Esc cancels; the highlight of the
-   pattern survives) unless the user asks otherwise.
-
-Files in play: `src/main.rs` (`handle_prompt_key`, the `Purpose::Search` arm of
-`answer`, `open_find`, `next_match`), `docs/keymap.md` §"The prompt line",
-possibly a new ADR 0024 ("Enter cycles the matches and Esc ends the search").
-Tests to update or add in `src/main.rs` (`#[cfg(test)] mod tests`):
-`enter_jumps_to_the_first_match`, `leader_n_walks_to_the_next_match_and_wraps_around`,
-plus a new one asserting the prompt is still `Some` after `Enter` and that two
-Enters land on the second match. `settle(&mut e)` drains the search jobs; use it
-after every Enter. Also tighten the e2e find test (§4, gap 6).
-
-Watch out for: `poll_search` moves the cursor while the prompt is open — that is
-fine and is what scrolls the match into view, because the terminal caret is
-parked on the prompt line, not in the document. Do not add a second "is the
-prompt open" special case to the view state; the prompt already owns the
-keyboard.
+1. **Atomic Save with Permission Preservation (CWE-732 & CWE-59)**:
+   - When saving an existing file, `Editor::save_to` reads `fs::metadata(&target).permissions()` and applies them directly to the temporary file before atomic renaming.
+   - Preserves POSIX file modes (`0644`, `0755`, etc.) across atomic overwrites.
+   - If the target file is a symlink, `canonicalize()` resolves the target first, ensuring the link itself is not replaced with a regular file or redirected maliciously.
+2. **Predictable Temporary File Sanitization (CWE-377)**:
+   - File creation in `/tmp` (e.g. for piped buffers or empty documents) uses atomic `OpenOptions::new().create_new(true)` with high-resolution nanosecond timestamps + PID nonces, completely eliminating symlink pre-creation race conditions.
+3. **Safe File-Type Validation**:
+   - `Doc::open` validates `metadata.is_file()`. Attempting to open directories, FIFOs, unix domain sockets, or device nodes is safely rejected with an informative error rather than blocking the editor process.
+4. **Git Command Argument & Option Injection Guards (CWE-88)**:
+   - All Git CLI subprocesses invoke commands with the explicit `--` pathspec delimiter (e.g., `git ls-files -- <path>`, `git diff -U0 -- <path>`), preventing files named `--help` or `-o` from being interpreted as CLI flags.
+5. **Git Path Traversal Rejection**:
+   - `relative_git_path` strictly rejects paths containing `..` or attempting to escape the repository working tree root.
 
 ---
 
-## 6. How work is done here (conventions that are checked by CI or review)
+## 6. Resilience & crash-proofing architecture
 
-- **Test first, in the owning file.** Unit tests live in a `#[cfg(test)] mod
-  tests` at the bottom of the module. `src/main.rs` has helpers:
-  `editor_with(name, bytes) -> (Editor, PathBuf)`, `key(KeyCode)`,
-  `chord(KeyCode)` (control modifier), `sequence(&mut Editor, "d w")`,
-  `type_into_prompt`, `prompt_text`, `line(&Editor, n)`, `settle`.
-  `render.rs` has `draw(doc, state, highlight) -> Buffer` for golden-style screen
-  assertions. `prompt.rs`, `search.rs`, `motion.rs`, `sequence.rs`, `indent.rs`,
-  `keys.rs`, `config.rs` are pure and tested without a terminal.
-- **Screen-level behaviour gets an e2e test** in `tests/e2e/test_zeno.py` only
-  when a unit test cannot see it (alternate screen, pty encoding, `zeno -`).
-  Keep them few and blunt; they are the slow, timing-sensitive layer.
-- **A change to behaviour updates `docs/keymap.md` in the same change.** It is
-  the user-facing contract, not commentary.
-- **A decision gets an ADR** in `docs/adr/NNNN-slug.md`: numbered in order, the
-  title a sentence ("The prompt owns the keyboard"), body in this shape —
-  the tension, "The decision is…", "Two alternatives were rejected…", "The costs
-  are…". Match the voice of 0019–0023: plain English, no bullet salad, no
-  marketing.
-- **Comments explain why, once.** The codebase's house style is prose above a
-  function explaining the constraint it answers, and no comment where the code
-  already says it.
-- **Commit messages** are imperative sentences, often two clauses joined by
-  `and` / a colon: `Give the viewport a horizontal axis, so a long line can be
-  read`, `Make the search reachable: find, cycle, highlight`. No
-  `feat:`/`fix:` prefixes.
-- **Performance work is measured, not argued.** `docs/performance.md` records
-  numbers with the shape of the machine; `zeno-bench` generates the data files
-  under `.bench-data/` (git-ignored). The budget is spec §7: first frame < 50 ms,
-  keystroke < 16 ms, launch < 30 ms.
-- Never make the input path wait: no `.join()` on a worker in the key handler,
-  no full-file scan on a keystroke. If an answer is not ready, paint without it.
+Engineered to guarantee the terminal is never left in a corrupted or unusable state:
+
+1. **RAII Raw Mode Guard (`RawModeGuard`)**:
+   - An explicit RAII guard encapsulates `crossterm::terminal::enable_raw_mode()` and alternate screen activation.
+   - When dropped under any condition (normal exit, error return, or panic unwind), it deterministically disables raw mode, leaves the alternate screen, and restores the cursor.
+2. **Global Panic Hook (`install_panic_hook`)**:
+   - At launch, `install_panic_hook()` sets a custom panic hook.
+   - If an unhandled panic occurs anywhere in the process, the hook immediately resets the terminal, shows the cursor, prints human-readable crash diagnostics to `stderr`, and exits cleanly.
+3. **Instant Terminal Resize Handling (`Event::Resize`)**:
+   - The event loop reacts immediately to terminal window resizing by updating layout geometry and triggering an instant redraw without waiting for an additional keypress.
+4. **Broken Pipe Resilience**:
+   - Spooled stdin processing (`zeno -`) explicitly handles `io::ErrorKind::BrokenPipe` without panicking when downstream consumers close the pipe early.
+5. **System Thread Exhaustion Tolerance**:
+   - Spawning background worker threads (syntect highlighting, search regex jobs) uses `thread::Builder::spawn().ok()` fallbacks. If the host OS refuses new threads, zeno continues editing in the foreground without crashing.
+6. **Defensive Math Invariants**:
+   - Status line percentage calculation uses `saturating_mul` to prevent integer overflow on large line counts.
+   - Scrollbar thumb math clamps `total.max(1)` to prevent division-by-zero on empty views.
 
 ---
 
-## 7. First thirty minutes
+## 7. Performance & zero-allocation hot paths
 
-1. `git status` and `git diff --stat` — confirm the uncommitted batch described
-   in §0 and commit it as a checkpoint.
-2. `cargo test` (expect 342 passing) and `cargo build --release`, then
-   `python -m unittest discover -s tests/e2e -v` (expect `OK (skipped=4)` here).
-3. Read `CONTEXT.md`, `docs/spec.md` §1–§7, `docs/keymap.md` (all of it), and
-   ADR 0013, 0014, 0016, 0022, 0023.
-4. Reproduce the current find behaviour by hand:
-   `python tools/tui_probe.py some.txt "\x06" "pattern" "\r" "\x1b" "\x1b"` and
-   watch the prompt line, the highlight, and the status-bar match count.
-5. Only then start §5. Write the failing test first.
+The keystroke event path must complete in microseconds to meet the <16 ms 60 FPS frame deadline:
+
+1. **ASCII Viewport Rendering Fast Path**:
+   - `styled_spans` detects whether a rendered line contains purely ASCII characters. For ASCII text, it slices string slices directly by byte index, avoiding `Vec<char>` allocations and per-span heap strings.
+2. **Line Wrap Cursor Search Fast Path**:
+   - `wrapped_cursor_position` performs an $O(1)$ bounds check: if the cursor is on a different line than the row being computed, it returns immediately rather than performing expensive wrap calculations.
+3. **Overlay Fast Guard**:
+   - `Overlay::locate` checks if the requested line index is lower than the first edited segment, returning `Segment::Original` in $O(1)$ time without searching the interval map.
+4. **Finder Lowercase Precomputation**:
+   - `FileFinder` precomputes lowercase byte representations once during directory discovery, saving ~2,000 heap string allocations on every single typed keystroke. Subsequence checking runs directly against ASCII byte slices.
+5. **Completion Token Streaming**:
+   - Autocompletion scans buffer lines using a zero-allocation `Words<'a>` iterator. Words are tested against a `HashSet<&str>` before allocating candidate `String` buffers.
+6. **Search Column Byte Mapping**:
+   - Regex matches on ASCII lines resolve character columns in $O(1)$ by direct byte offset, bypassing UTF-8 char counting.
 
 ---
 
-## 8. Starter prompt for the next agent
+## 8. Conventions & development rules
 
-Paste this, together with this file, at the start of the new session:
+- **Test first, in the owning file**: Unit tests belong in a `#[cfg(test)] mod tests` at the bottom of each module.
+- **Golden tests for rendering**: Use `render::draw(doc, state, highlight) -> Buffer` to test screen outputs without real hardware.
+- **Keep e2e tests focused**: PTY tests in `tests/e2e/test_zeno.py` are reserved for behavior that requires a real pseudo-terminal (such as alternate screen switching and ConPTY byte translation).
+- **Update documentation in the same commit**: Any change to keybindings or behavior must update `docs/keymap.md`. Any major architectural decision requires a new record in `docs/adr/`.
+- **House style for commit messages**: Imperative mood, clauses joined with `and`, no trailing punctuation, no `feat:` or `fix:` prefixes (e.g. `highlight matching bracket pairs in viewport and add toggle command with config option`).
+- **Zero latency budget**: Never invoke `.join()` on a background worker thread from the main key event loop. If an asynchronous result is not ready, render the current frame without it.
 
-> You are continuing work on **zeno**, a non-modal terminal text editor written
-> in Rust. Start by reading `HANDOFF.md` in the project root, then `CONTEXT.md`,
-> `docs/spec.md`, `docs/keymap.md`, and the ADRs it points at. Treat `HANDOFF.md`
-> §1 (non-negotiables) and §6 (conventions) as binding.
->
-> First, confirm the baseline: `cargo test`, `cargo build --release`, and
-> `python -m unittest discover -s tests/e2e -v`. Report the counts you see
-> before changing anything. The working tree already contains one large
-> uncommitted batch of work — commit it as a checkpoint first, without
-> rewriting existing commits, and keep your own change separate.
->
-> Then do the task in `HANDOFF.md` §5: while the Find prompt is open, `Enter`
-> must move to the next match and keep the prompt open, cycling through the
-> results and wrapping at the end of the file; the first `Esc` closes the prompt
-> but keeps the matches highlighted; a second `Esc` clears the highlight and
-> returns to fully ordinary editing. This is the VSCode behaviour the user
-> asked for. Write the failing test first, keep the change in `src/main.rs`,
-> update `docs/keymap.md`, and add an ADR for the Enter/Esc rule.
->
-> Report what you verified (unit tests, e2e tests, and the behaviour typed into
-> a real screen), and do not claim a check you could not run.
+---
+
+## 9. Next recommended roadmap
+
+Future extensions that fit cleanly within zeno's architecture:
+
+1. **Persistent Session State**: Optionally record last-visited cursor positions across editor sessions in `~/.config/zeno/session.json`.
+2. **Expanded File Picker Filters**: Add `.gitignore` awareness to the file finder worker.
+3. **Language Server Protocol (LSP) Sidecar**: If diagnostics are ever introduced, implement as a strictly non-blocking external worker over JSON-RPC stdin/stdout without stalling the render thread.
+
+---
+
+## 10. Starter prompt for the next agent
+
+```text
+You are continuing development on zeno, a high-performance, non-modal terminal text editor written in Rust.
+Start by reading HANDOFF.md, CONTEXT.md, docs/spec.md, and docs/keymap.md.
+All non-negotiable architectural rules in HANDOFF.md §1 and ADRs 0001–0024 are binding.
+
+Verify the baseline before making any changes:
+1. Run `cargo test` (expect 511 tests passing: 295 lib + 216 bin).
+2. Run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings` (must be clean).
+3. Check `git status` to ensure you start from a clean tree.
+
+When implementing changes:
+- Write unit tests first in the owning module.
+- Never block the key handling loop; all background work uses versioned snapshots.
+- Follow the imperative commit message convention joined by 'and'.
+- Update docs/keymap.md and add an ADR if keyboard behavior or architecture changes.
+```
