@@ -95,6 +95,23 @@ pub fn is_word_char(c: char) -> bool {
 /// word character, or `None` if the cursor is at the line start or preceded by
 /// non-word characters.
 pub fn find_prefix(line_text: &str, col: usize) -> Option<(usize, String)> {
+    if line_text.is_ascii() {
+        let len = line_text.len();
+        let col = col.min(len);
+        if col == 0 {
+            return None;
+        }
+        let bytes = line_text.as_bytes();
+        if !is_word_char(bytes[col - 1] as char) {
+            return None;
+        }
+        let mut start = col - 1;
+        while start > 0 && is_word_char(bytes[start - 1] as char) {
+            start -= 1;
+        }
+        return Some((start, line_text[start..col].to_owned()));
+    }
+
     let chars: Vec<char> = line_text.chars().collect();
     let col = col.min(chars.len());
     if col == 0 {
@@ -111,23 +128,45 @@ pub fn find_prefix(line_text: &str, col: usize) -> Option<(usize, String)> {
     Some((start, prefix))
 }
 
+/// An iterator yielding word slices from a line without heap allocation.
+pub struct Words<'a> {
+    line: &'a str,
+    indices: std::str::CharIndices<'a>,
+    start: Option<usize>,
+}
+
+impl<'a> Iterator for Words<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        for (idx, c) in self.indices.by_ref() {
+            if is_word_char(c) {
+                if self.start.is_none() {
+                    self.start = Some(idx);
+                }
+            } else if let Some(s) = self.start.take() {
+                return Some(&self.line[s..idx]);
+            }
+        }
+        if let Some(s) = self.start.take() {
+            return Some(&self.line[s..]);
+        }
+        None
+    }
+}
+
+/// Returns an iterator yielding all word slices in `line` without heap allocation.
+pub fn words(line: &str) -> Words<'_> {
+    Words {
+        line,
+        indices: line.char_indices(),
+        start: None,
+    }
+}
+
 /// Extracts all word slices from `line`.
 pub fn words_in_line(line: &str) -> Vec<&str> {
-    let mut words = Vec::new();
-    let mut start = None;
-    for (idx, c) in line.char_indices() {
-        if is_word_char(c) {
-            if start.is_none() {
-                start = Some(idx);
-            }
-        } else if let Some(s) = start.take() {
-            words.push(&line[s..idx]);
-        }
-    }
-    if let Some(s) = start {
-        words.push(&line[s..]);
-    }
-    words
+    words(line).collect()
 }
 
 /// Collects candidate completions for `prefix` from `doc` around `cursor`.
@@ -146,9 +185,11 @@ pub fn find_candidates(doc: &Doc, cursor: Pos, prefix: &str) -> Vec<String> {
 
     // First scan current line
     if let Some(text) = doc.line_text(cursor.line) {
-        for word in words_in_line(&text) {
-            if word.starts_with(prefix) && seen.insert(word.to_string()) {
-                candidates.push(word.to_string());
+        for word in words(&text) {
+            if word.starts_with(prefix) && !seen.contains(word) {
+                let word_str = word.to_string();
+                seen.insert(word_str.clone());
+                candidates.push(word_str);
             }
         }
     }
@@ -166,9 +207,11 @@ pub fn find_candidates(doc: &Doc, cursor: Pos, prefix: &str) -> Vec<String> {
             && let Some(text) = doc.line_text(cursor.line - dist)
         {
             checked_any = true;
-            for word in words_in_line(&text) {
-                if word.starts_with(prefix) && seen.insert(word.to_string()) {
-                    candidates.push(word.to_string());
+            for word in words(&text) {
+                if word.starts_with(prefix) && !seen.contains(word) {
+                    let word_str = word.to_string();
+                    seen.insert(word_str.clone());
+                    candidates.push(word_str);
                     if candidates.len() >= max_candidates {
                         break;
                     }
@@ -181,9 +224,11 @@ pub fn find_candidates(doc: &Doc, cursor: Pos, prefix: &str) -> Vec<String> {
             && let Some(text) = doc.line_text(line_below)
         {
             checked_any = true;
-            for word in words_in_line(&text) {
-                if word.starts_with(prefix) && seen.insert(word.to_string()) {
-                    candidates.push(word.to_string());
+            for word in words(&text) {
+                if word.starts_with(prefix) && !seen.contains(word) {
+                    let word_str = word.to_string();
+                    seen.insert(word_str.clone());
+                    candidates.push(word_str);
                     if candidates.len() >= max_candidates {
                         break;
                     }
@@ -232,11 +277,13 @@ mod tests {
     #[test]
     fn words_in_line_extracts_all_word_tokens() {
         let line = "fn calculate_sum(a: i32, b_1: i32) -> i64 {";
-        let words = words_in_line(line);
+        let word_vec = words_in_line(line);
+        let iter_vec: Vec<&str> = words(line).collect();
         assert_eq!(
-            words,
+            word_vec,
             vec!["fn", "calculate_sum", "a", "i32", "b_1", "i32", "i64"]
         );
+        assert_eq!(iter_vec, word_vec);
     }
 
     #[test]

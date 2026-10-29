@@ -94,6 +94,15 @@ pub fn scan_dir(root: &Path) -> Vec<PathBuf> {
 
 /// Checks whether all characters in `needle` appear in `haystack` in order.
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
+    if needle.is_ascii() && haystack.is_ascii() {
+        let mut haystack_bytes = haystack.as_bytes().iter();
+        for &nb in needle.as_bytes() {
+            if !haystack_bytes.any(|&hb| hb == nb) {
+                return false;
+            }
+        }
+        return true;
+    }
     let mut haystack_chars = haystack.chars();
     for nc in needle.chars() {
         if !haystack_chars.any(|hc| hc == nc) {
@@ -108,6 +117,7 @@ fn is_subsequence(needle: &str, haystack: &str) -> bool {
 pub struct FileFinder {
     query: String,
     entries: Vec<FileEntry>,
+    lowers: Vec<String>,
     matches: Vec<usize>,
     selected: usize,
 }
@@ -121,9 +131,11 @@ impl Default for FileFinder {
 impl FileFinder {
     pub fn new(entries: Vec<FileEntry>) -> Self {
         let matches = (0..entries.len()).collect();
+        let lowers = entries.iter().map(|e| e.display.to_lowercase()).collect();
         Self {
             query: String::new(),
             entries,
+            lowers,
             matches,
             selected: 0,
         }
@@ -236,18 +248,18 @@ impl FileFinder {
         }
 
         let query = self.query.to_lowercase();
-        let mut scored: Vec<(u8, usize)> = Vec::new();
+        let mut scored: Vec<(u8, usize)> = Vec::with_capacity(self.entries.len());
 
-        for (idx, entry) in self.entries.iter().enumerate() {
-            let lower = entry.display.to_lowercase();
-            let file_name = lower.rsplit('/').next().unwrap_or(&lower);
+        for (idx, lower) in self.lowers.iter().enumerate() {
+            let entry = &self.entries[idx];
+            let file_name = lower.rsplit('/').next().unwrap_or(lower);
 
             let bonus = if entry.is_recent { 0 } else { 1 };
             if file_name.contains(&query) {
                 scored.push((bonus, idx));
             } else if lower.contains(&query) {
                 scored.push((2 + bonus, idx));
-            } else if is_subsequence(&query, &lower) {
+            } else if is_subsequence(&query, lower) {
                 scored.push((4 + bonus, idx));
             }
         }

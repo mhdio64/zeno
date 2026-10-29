@@ -79,6 +79,9 @@ impl Iterator for Matches<'_> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let found = self.inner.as_mut()?.next()?;
+        if self.text.is_ascii() {
+            return Some((found.start(), found.end()));
+        }
         let start = self.char_at + self.text[self.byte_at..found.start()].chars().count();
         let end = start + found.as_str().chars().count();
         self.byte_at = found.end();
