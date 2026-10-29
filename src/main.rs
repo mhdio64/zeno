@@ -33,7 +33,7 @@ use zeno_cli::finder::{self, FileFinder};
 use zeno_cli::git::GitState;
 use zeno_cli::highlight::Highlighter;
 use zeno_cli::indent::{self, IndentStyle};
-use zeno_cli::keys::Keymap;
+use zeno_cli::keys::{Keymap, chord_letter};
 use zeno_cli::motion::{self, Motion};
 use zeno_cli::panel::{self, Palette};
 use zeno_cli::prompt::{Prompt, Purpose};
@@ -81,64 +81,6 @@ const CHANGED_ON_DISK: &[(char, &str)] = &[('r', "reload"), ('o', "overwrite"), 
 enum Answer {
     Text(String),
     Choice(char),
-}
-
-#[cfg(windows)]
-unsafe extern "system" {
-    /// Maps a character to the virtual-key code of the key that types it on
-    /// the active keyboard layout. Returns -1 when no key types it.
-    fn VkKeyScanW(ch: u16) -> i16;
-}
-
-/// The letter a `Ctrl` chord stands for.
-///
-/// Chords must not be identified by the character the layout produces for
-/// them. On Windows, `Ctrl+S` arrives as the character on the S key of the
-/// *active* layout — `'س'` on a Persian layout, `'ы'` on Russian — so
-/// matching on `'s'` would leave every chord dead for anyone not typing on
-/// a Latin layout. The physical key is the stable identity, so the character
-/// is mapped back to the key that types it.
-fn chord_letter(code: KeyCode) -> Option<char> {
-    let KeyCode::Char(c) = code else {
-        return None;
-    };
-    if c.is_ascii_alphabetic() {
-        return Some(c.to_ascii_lowercase());
-    }
-    // A bare control character, as a VT-style terminal sends it.
-    let n = c as u32;
-    if (1..=26).contains(&n) {
-        return char::from_u32(n + 0x60);
-    }
-    #[cfg(windows)]
-    {
-        layout_letter(c)
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-/// The ASCII letter typed by the key that produces `c` on the active layout.
-#[cfg(windows)]
-fn layout_letter(c: char) -> Option<char> {
-    let mut buf = [0u16; 2];
-    let encoded = c.encode_utf16(&mut buf);
-    if encoded.len() != 1 {
-        return None;
-    }
-    let vk = unsafe { VkKeyScanW(encoded[0]) };
-    if vk == -1 {
-        return None;
-    }
-    // The low byte is the virtual-key code, the high byte the shift state.
-    let vk = (vk as u16) & 0xFF;
-    match vk {
-        // 'A'..='Z'
-        0x41..=0x5A => char::from_u32(vk as u32).map(|ch| ch.to_ascii_lowercase()),
-        _ => None,
-    }
 }
 
 /// The prompt as a widget: the label and the text being typed.

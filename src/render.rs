@@ -278,6 +278,72 @@ impl<'a> View<'a> {
         base: Style,
         highlights: &SpanHighlights<'_>,
     ) -> Vec<Span<'static>> {
+        if text.is_empty() {
+            return vec![Span::styled(String::new(), base)];
+        }
+
+        // Fast path for ASCII text (vast majority of source code lines):
+        // skips collecting `Vec<char>`, slices bytes directly via `memcpy`, and avoids
+        // per-character string reconstruction.
+        if text.is_ascii() {
+            let len = text.len();
+            let mut styles = vec![base; len];
+
+            for (start, end, style) in highlights.syntax {
+                let start = (*start).min(len);
+                let end = (*end).clamp(start, len);
+                for slot in &mut styles[start..end] {
+                    *slot = (*slot).patch(*style);
+                }
+            }
+
+            let word_style = self.word_match_style();
+            for (start, end) in highlights.word_matches {
+                let start = (*start).min(len);
+                let end = (*end).clamp(start, len);
+                for slot in &mut styles[start..end] {
+                    *slot = (*slot).patch(word_style);
+                }
+            }
+
+            let bracket_style = self.matching_bracket_style();
+            for &col in highlights.bracket_highlights {
+                if col < len {
+                    styles[col] = styles[col].patch(bracket_style);
+                }
+            }
+
+            for (start, end) in highlights.matches {
+                let start = (*start).min(len);
+                let end = (*end).clamp(start, len);
+                for slot in &mut styles[start..end] {
+                    *slot = self.match_style();
+                }
+            }
+
+            if let Some((from, to)) = highlights.selection {
+                let from = from.min(len);
+                let to = to.clamp(from, len);
+                for slot in &mut styles[from..to] {
+                    *slot = self.selection_style();
+                }
+            }
+
+            let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
+            let mut start = 0;
+            for col in 1..=len {
+                if col == len || styles[col] != styles[start] {
+                    spans.push(Span::styled(text[start..col].to_owned(), styles[start]));
+                    start = col;
+                }
+            }
+            if spans.is_empty() {
+                spans.push(Span::styled(String::new(), base));
+            }
+            return spans;
+        }
+
+        // Unicode / RTL fallback path: handles multi-byte characters and Persian BiDi shaping
         let chars: Vec<char> = text.chars().collect();
         let mut styles = vec![base; chars.len()];
         // The syntax says what the text means. It is painted first, because
@@ -335,7 +401,7 @@ impl<'a> View<'a> {
             (chars, styles)
         };
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(8);
         let mut start = 0;
         for col in 1..=display_chars.len() {
             if col == display_chars.len() || display_styles[col] != display_styles[start] {
@@ -401,11 +467,21 @@ impl<'a> View<'a> {
         gutter: u16,
         body_width: u16,
     ) -> Option<(u16, u16)> {
+        if self.state.cursor_line < self.state.top_line {
+            return None;
+        }
+        let max_rows = (area.height as usize).saturating_add(self.state.top_row);
+        if self.state.cursor_line.saturating_sub(self.state.top_line) > max_rows as u64 {
+            return None;
+        }
         let width = body_width as usize;
         let mut row = 0usize;
         let mut line = self.state.top_line;
         while line < self.state.cursor_line {
             row += wrapped_row_count(&self.chars_of(line), width);
+            if row >= max_rows {
+                return None;
+            }
             line += 1;
         }
         let chars = self.chars_of(self.state.cursor_line);
@@ -1571,6 +1647,15 @@ mod tests {
         let state = wrap_state(10, 0, 10, 0);
         let view = View::new(&doc, &state);
         assert_eq!(view.cursor_position(Rect::new(0, 0, 10, 4)), Some((0, 1)));
+    }
+
+    #[test]
+    fn cursor_position_off_screen_returns_none_fast() {
+        let doc = doc_of("wrap-cursor-far.txt", b"alpha\nbeta\ngamma\n");
+        let mut state = wrap_state(10, 0, 0, 0);
+        state.cursor_line = 5000;
+        let view = View::new(&doc, &state);
+        assert!(view.cursor_position(Rect::new(0, 0, 10, 4)).is_none());
     }
 
     #[test]

@@ -84,6 +84,16 @@ impl Overlay {
 
     /// Finds where a current line lives.
     fn locate(&self, current_line: u64) -> Location {
+        let Some(first) = self.segments.first() else {
+            return Location::Original {
+                original: current_line,
+            };
+        };
+        if current_line < first.original_line {
+            return Location::Original {
+                original: current_line,
+            };
+        }
         let mut delta: i64 = 0;
         for (segment, edit) in self.segments.iter().enumerate() {
             let start = edit.original_line as i64 + delta;
