@@ -654,6 +654,7 @@ impl Editor {
         self.view.show_git_diff = settings.git_diff;
         self.view.git_gutter_style = settings.git_gutter_style.parse().unwrap_or_default();
         self.view.highlight_word = settings.highlight_word;
+        self.view.highlight_bracket = settings.highlight_bracket;
         if settings.zen_mode != self.zen_mode {
             self.toggle_zen_mode();
         }
@@ -1622,6 +1623,15 @@ impl Editor {
                     "word highlight enabled"
                 } else {
                     "word highlight disabled"
+                }
+                .into();
+            }
+            Command::ToggleMatchingBracket => {
+                self.view.highlight_bracket = !self.view.highlight_bracket;
+                self.message = if self.view.highlight_bracket {
+                    "matching bracket highlight enabled"
+                } else {
+                    "matching bracket highlight disabled"
                 }
                 .into();
             }
@@ -7122,6 +7132,27 @@ trim_trailing_whitespace = true
         e.command(Command::ToggleWordHighlight);
         assert!(e.view.highlight_word);
         assert_eq!(e.message, "word highlight enabled");
+    }
+
+    #[test]
+    fn matching_bracket_toggle_command_toggles_and_reports_message() {
+        let (mut e, _p) = editor_with("bracket-toggle.txt", b"hello\n");
+        assert!(e.view.highlight_bracket);
+        e.command(Command::ToggleMatchingBracket);
+        assert!(!e.view.highlight_bracket);
+        assert_eq!(e.message, "matching bracket highlight disabled");
+        e.command(Command::ToggleMatchingBracket);
+        assert!(e.view.highlight_bracket);
+        assert_eq!(e.message, "matching bracket highlight enabled");
+    }
+
+    #[test]
+    fn matching_bracket_setting_applied_from_config() {
+        let (mut e, _p) = editor_with("bracket-config.txt", b"hello\n");
+        assert!(e.view.highlight_bracket);
+        let config = config::parse_config("[settings]\nhighlight_bracket = false\n");
+        e.apply_settings(&config);
+        assert!(!e.view.highlight_bracket);
     }
 
     #[test]

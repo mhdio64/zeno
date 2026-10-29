@@ -72,6 +72,8 @@ pub struct ViewState {
     pub git_gutter_style: GitGutterStyle,
     /// Whether occurrences of the word under cursor are highlighted in the viewport.
     pub highlight_word: bool,
+    /// Whether matching bracket pairs are highlighted in the viewport.
+    pub highlight_bracket: bool,
 }
 
 impl Default for ViewState {
@@ -92,6 +94,7 @@ impl Default for ViewState {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         }
     }
 }
@@ -109,6 +112,14 @@ pub struct View<'a> {
     pub diff_signs: Option<&'a HashMap<usize, DiffSign>>,
     /// The active theme's colors for editor canvas, cursor line, gutter, and chrome.
     pub theme: ThemeColors,
+}
+
+struct SpanHighlights<'a> {
+    syntax: &'a [(usize, usize, Style)],
+    word_matches: &'a [(usize, usize)],
+    selection: Option<(usize, usize)>,
+    matches: &'a [(usize, usize)],
+    bracket_highlights: &'a [usize],
 }
 
 impl<'a> View<'a> {
@@ -265,17 +276,14 @@ impl<'a> View<'a> {
         &self,
         text: &str,
         base: Style,
-        syntax: &[(usize, usize, Style)],
-        word_matches: &[(usize, usize)],
-        selection: Option<(usize, usize)>,
-        matches: &[(usize, usize)],
+        highlights: &SpanHighlights<'_>,
     ) -> Vec<Span<'static>> {
         let chars: Vec<char> = text.chars().collect();
         let mut styles = vec![base; chars.len()];
         // The syntax says what the text means. It is painted first, because
         // the search match and the selection say what the user is looking
         // at, and those win.
-        for (start, end, style) in syntax {
+        for (start, end, style) in highlights.syntax {
             let start = (*start).min(chars.len());
             let end = (*end).clamp(start, chars.len());
             for slot in &mut styles[start..end] {
@@ -284,14 +292,21 @@ impl<'a> View<'a> {
         }
         // Word under cursor matches: subtle background + underline
         let word_style = self.word_match_style();
-        for (start, end) in word_matches {
+        for (start, end) in highlights.word_matches {
             let start = (*start).min(chars.len());
             let end = (*end).clamp(start, chars.len());
             for slot in &mut styles[start..end] {
                 *slot = (*slot).patch(word_style);
             }
         }
-        for (start, end) in matches {
+        // Matching bracket pair: distinct color + subtle background + bold + underline
+        let bracket_style = self.matching_bracket_style();
+        for &col in highlights.bracket_highlights {
+            if col < chars.len() {
+                styles[col] = styles[col].patch(bracket_style);
+            }
+        }
+        for (start, end) in highlights.matches {
             let start = (*start).min(chars.len());
             let end = (*end).clamp(start, chars.len());
             for slot in &mut styles[start..end] {
@@ -300,7 +315,7 @@ impl<'a> View<'a> {
         }
         // The selection wins over the search match: it is what the user has
         // just made, and one highlight is easier to read than two.
-        if let Some((from, to)) = selection {
+        if let Some((from, to)) = highlights.selection {
             let from = from.min(chars.len());
             let to = to.clamp(from, chars.len());
             for slot in &mut styles[from..to] {
@@ -620,6 +635,14 @@ impl View<'_> {
             .bg(self.theme.word_match_bg())
             .add_modifier(Modifier::UNDERLINED)
     }
+
+    /// The style a matching bracket pair is painted in.
+    fn matching_bracket_style(&self) -> Style {
+        Style::default()
+            .fg(self.theme.matching_bracket_fg())
+            .bg(self.theme.matching_bracket_bg())
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+    }
 }
 
 /// How far past the right edge the search pattern is still read.
@@ -654,6 +677,15 @@ impl Widget for View<'_> {
 
         let current_word = if self.state.highlight_word && self.state.anchor.is_none() {
             self.word_under_cursor()
+        } else {
+            None
+        };
+
+        let matching_brackets = if self.state.highlight_bracket && self.state.anchor.is_none() {
+            crate::motion::find_matching_pair(
+                self.doc,
+                Pos::new(self.state.cursor_line, self.state.cursor_col),
+            )
         } else {
             None
         };
@@ -748,19 +780,25 @@ impl Widget for View<'_> {
             } else {
                 Vec::new()
             };
+            let mut bracket_matches = Vec::new();
+            if let Some((b1, b2)) = matching_brackets {
+                if b1.line == line_no && b1.col >= left && b1.col < left + painted {
+                    bracket_matches.push(b1.col - left);
+                }
+                if b2.line == line_no && b2.col >= left && b2.col < left + painted {
+                    bracket_matches.push(b2.col - left);
+                }
+            }
             let matches = self.match_ranges_in(head, left - behind, painted);
             let syntax = self.syntax_spans(line_no, left, painted);
-            body_lines.push(
-                Line::from(self.styled_spans(
-                    &clipped,
-                    base,
-                    &syntax,
-                    &word_matches,
-                    selection,
-                    &matches,
-                ))
-                .style(base),
-            );
+            let highlights = SpanHighlights {
+                syntax: &syntax,
+                word_matches: &word_matches,
+                selection,
+                matches: &matches,
+                bracket_highlights: &bracket_matches,
+            };
+            body_lines.push(Line::from(self.styled_spans(&clipped, base, &highlights)).style(base));
         }
 
         if self.state.show_line_numbers {
@@ -962,6 +1000,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let text = frame_text(&doc, &state, 20, 4);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -997,6 +1036,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("alpha"), "{text}");
@@ -1022,6 +1062,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let text = frame_text(&doc, &state, 20, 3);
         assert!(text.contains("three"), "{text}");
@@ -1047,6 +1088,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 4)));
@@ -1094,6 +1136,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -1120,6 +1163,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         assert_eq!(view.selection_span(0), Some((1, 3)));
@@ -1149,6 +1193,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1188,6 +1233,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let backend = TestBackend::new(20, 3);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -1230,6 +1276,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         assert!(view.match_ranges(0, 20).is_empty());
@@ -1254,6 +1301,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         let area = Rect::new(0, 0, 20, 3);
@@ -1281,6 +1329,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         }
     }
 
@@ -1438,6 +1487,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         }
     }
 
@@ -1482,6 +1532,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let text = frame_text(&doc, &state, 16, 5);
         let rows: Vec<&str> = text.split('\n').collect();
@@ -1552,6 +1603,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1582,6 +1634,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1616,6 +1669,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
@@ -1665,6 +1719,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1693,6 +1748,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let buffer = draw(&doc, &state, None);
         assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
@@ -1720,6 +1776,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let buffer = draw(&doc, &state, None);
         assert!(!buffer[(2, 0)].modifier.contains(Modifier::REVERSED));
@@ -1745,6 +1802,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::MONOKAI);
         // Cursor line gets Monokai's #3e3d32
@@ -1775,6 +1833,7 @@ mod tests {
             show_git_diff: true,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: true,
+            highlight_bracket: true,
         };
         let buffer = draw_with_theme(&doc, &state, None, ThemeColors::SOLARIZED_LIGHT);
         // Selection is dark navy #073642 on light theme
@@ -2081,6 +2140,80 @@ mod tests {
     }
 
     #[test]
+    fn matching_bracket_highlights_in_rendered_buffer() {
+        let doc = doc_of("bracket_hl.txt", b"fn f(x, y) { z }\n");
+        // Cursor on '(' at col 4
+        let state = ViewState {
+            top_line: 0,
+            cursor_line: 0,
+            cursor_col: 4,
+            show_line_numbers: false,
+            highlight_bracket: true,
+            ..ViewState::default()
+        };
+
+        let backend = TestBackend::new(25, 1);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|f| {
+                let view = View::new(&doc, &state);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        // Col 4 '(' and col 9 ')' should both have BOLD and UNDERLINED
+        assert!(
+            buffer[(4, 0)]
+                .modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "col 4 '(' should be highlighted"
+        );
+        assert!(
+            buffer[(9, 0)]
+                .modifier
+                .contains(Modifier::BOLD | Modifier::UNDERLINED),
+            "col 9 ')' should be highlighted"
+        );
+        // Col 5 'x' should NOT have BOLD
+        assert!(
+            !buffer[(5, 0)].modifier.contains(Modifier::BOLD),
+            "col 5 'x' should not be bold"
+        );
+
+        // When highlight_bracket is false, neither bracket is bold
+        let state_off = ViewState {
+            highlight_bracket: false,
+            ..state.clone()
+        };
+        let mut terminal_off = Terminal::new(TestBackend::new(25, 1)).unwrap();
+        terminal_off
+            .draw(|f| {
+                let view = View::new(&doc, &state_off);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer_off = terminal_off.backend().buffer();
+        assert!(!buffer_off[(4, 0)].modifier.contains(Modifier::BOLD));
+        assert!(!buffer_off[(9, 0)].modifier.contains(Modifier::BOLD));
+
+        // When selection (anchor) is active, bracket highlight is disabled
+        let state_sel = ViewState {
+            anchor: Some(Pos { line: 0, col: 0 }),
+            ..state.clone()
+        };
+        let mut terminal_sel = Terminal::new(TestBackend::new(25, 1)).unwrap();
+        terminal_sel
+            .draw(|f| {
+                let view = View::new(&doc, &state_sel);
+                f.render_widget(view, f.area());
+            })
+            .unwrap();
+        let buffer_sel = terminal_sel.backend().buffer();
+        assert!(!buffer_sel[(9, 0)].modifier.contains(Modifier::BOLD));
+    }
+
+    #[test]
     fn persian_text_renders_shaped_and_reordered_in_terminal_buffer() {
         let doc = doc_of("fa.txt", "سلام\n".as_bytes());
         let state = ViewState {
@@ -2099,6 +2232,7 @@ mod tests {
             show_git_diff: false,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let backend = TestBackend::new(20, 2);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -2138,6 +2272,7 @@ mod tests {
             show_git_diff: false,
             git_gutter_style: GitGutterStyle::Bar,
             highlight_word: false,
+            highlight_bracket: true,
         };
         let view = View::new(&doc, &state);
         let pos = view.cursor_position(Rect::new(0, 0, 20, 2));

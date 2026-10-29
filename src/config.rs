@@ -39,6 +39,8 @@ pub struct Settings {
     pub git_gutter_style: String,
     /// Whether occurrences of the word under cursor are highlighted in the viewport.
     pub highlight_word: bool,
+    /// Whether matching bracket pairs are highlighted in the viewport.
+    pub highlight_bracket: bool,
     /// Whether Zen (distraction-free) mode is enabled.
     pub zen_mode: bool,
 }
@@ -58,6 +60,7 @@ impl Default for Settings {
             git_diff: true,
             git_gutter_style: "bar".to_string(),
             highlight_word: true,
+            highlight_bracket: true,
             zen_mode: false,
         }
     }
@@ -233,6 +236,9 @@ fn parse_setting(settings: &mut Settings, key: &str, value: &str) {
         "git_diff" | "git_gutter" => set_bool(&mut settings.git_diff, value),
         "highlight_word" | "highlight_word_under_cursor" => {
             set_bool(&mut settings.highlight_word, value)
+        }
+        "highlight_bracket" | "highlight_matching_bracket" | "matching_bracket" => {
+            set_bool(&mut settings.highlight_bracket, value)
         }
         "zen_mode" | "zen" | "distraction_free" => set_bool(&mut settings.zen_mode, value),
         "git_gutter_style" => {
@@ -599,6 +605,17 @@ leader = "ctrl+space"
         let text_alias = "[settings]\nhighlight_word_under_cursor = true\n";
         let config_alias = parse(text_alias);
         assert!(config_alias.highlight_word);
+    }
+
+    #[test]
+    fn highlight_bracket_setting_is_read() {
+        let text = "[settings]\nhighlight_bracket = false\n";
+        let config = parse(text);
+        assert!(!config.highlight_bracket);
+
+        let text_alias = "[settings]\nhighlight_matching_bracket = true\n";
+        let config_alias = parse(text_alias);
+        assert!(config_alias.highlight_bracket);
     }
 
     #[test]

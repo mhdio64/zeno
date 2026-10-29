@@ -196,6 +196,28 @@ impl ThemeColors {
             Color::Rgb(65, 72, 85)
         }
     }
+
+    /// Foreground color for matching bracket highlighting.
+    pub fn matching_bracket_fg(&self) -> Color {
+        if !self.is_dark {
+            Color::Rgb(38, 139, 210)
+        } else if self.bg == Color::Black && self.fg == Color::White {
+            Color::Yellow
+        } else {
+            Color::Rgb(102, 217, 239)
+        }
+    }
+
+    /// Background color for matching bracket highlighting.
+    pub fn matching_bracket_bg(&self) -> Color {
+        if !self.is_dark {
+            Color::Rgb(215, 230, 245)
+        } else if self.bg == Color::Black && self.fg == Color::White {
+            Color::Rgb(50, 50, 50)
+        } else {
+            Color::Rgb(70, 80, 95)
+        }
+    }
 }
 
 impl Default for ThemeColors {

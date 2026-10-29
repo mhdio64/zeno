@@ -417,7 +417,7 @@ fn char_at(doc: &Doc, pos: Pos) -> Option<char> {
 }
 
 /// The bracket pairs `%` knows.
-fn bracket_pair(c: char) -> Option<(char, char)> {
+pub fn bracket_pair(c: char) -> Option<(char, char)> {
     Some(match c {
         '(' => ('(', ')'),
         '[' => ('[', ']'),
@@ -429,7 +429,7 @@ fn bracket_pair(c: char) -> Option<(char, char)> {
     })
 }
 
-fn is_opener(c: char) -> bool {
+pub fn is_opener(c: char) -> bool {
     matches!(c, '(' | '[' | '{')
 }
 
@@ -457,6 +457,68 @@ fn step_char(doc: &Doc, pos: Pos, forward: bool) -> Option<Pos> {
     }
 }
 
+/// Finds the matching partner bracket for the bracket at `start`.
+pub fn find_partner(doc: &Doc, start: Pos) -> Option<Pos> {
+    let opening = char_at(doc, start)?;
+    let (open, close) = bracket_pair(opening)?;
+    let forward = is_opener(opening);
+    let (mine, other) = if forward {
+        (open, close)
+    } else {
+        (close, open)
+    };
+
+    let mut depth: i32 = 0;
+    if forward {
+        let mut line = start.line;
+        let mut skip_col = start.col;
+        while line.saturating_sub(start.line) <= MAX_LANDMARK_LINES {
+            let Some(text) = doc.line_text(line) else {
+                break;
+            };
+            for (col, c) in text.chars().enumerate().skip(skip_col) {
+                if c == mine {
+                    depth += 1;
+                } else if c == other {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(Pos::new(line, col));
+                    }
+                }
+            }
+            line += 1;
+            skip_col = 0;
+        }
+    } else {
+        let mut line = start.line;
+        let mut take_col = start.col + 1;
+        while start.line.saturating_sub(line) <= MAX_LANDMARK_LINES {
+            let Some(text) = doc.line_text(line) else {
+                break;
+            };
+            let chars: Vec<char> = text.chars().collect();
+            let end = take_col.min(chars.len());
+            for col in (0..end).rev() {
+                let c = chars[col];
+                if c == mine {
+                    depth += 1;
+                } else if c == other {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(Pos::new(line, col));
+                    }
+                }
+            }
+            if line == 0 {
+                break;
+            }
+            line -= 1;
+            take_col = usize::MAX;
+        }
+    }
+    None
+}
+
 /// The bracket matching the one under the cursor, or the next one after it.
 ///
 /// The scan is capped by [`MAX_LANDMARK_LINES`], so an unbalanced file cannot
@@ -474,38 +536,26 @@ fn matching_bracket(doc: &Doc, from: Pos) -> Pos {
     let Some(start) = start else {
         return from;
     };
-    let opening = char_at(doc, start).expect("a bracket was found there");
-    let (open, close) = bracket_pair(opening).expect("bracket_pair answered for it");
-    let forward = is_opener(opening);
-    // The scan counts its own bracket up and the opposite one down, whichever
-    // direction it walks, so it needs no special case for a closer.
-    let (mine, other) = if forward {
-        (open, close)
+    find_partner(doc, start).unwrap_or(from)
+}
+
+/// Finds the matching bracket pair for the cursor position if the cursor is on or beside a bracket.
+/// Returns `Some((bracket_pos, partner_pos))` if a matching pair exists.
+pub fn find_matching_pair(doc: &Doc, cursor: Pos) -> Option<(Pos, Pos)> {
+    let bracket_pos = if char_at(doc, cursor).is_some_and(|c| bracket_pair(c).is_some()) {
+        Some(cursor)
+    } else if cursor.col > 0
+        && char_at(doc, Pos::new(cursor.line, cursor.col - 1))
+            .is_some_and(|c| bracket_pair(c).is_some())
+    {
+        Some(Pos::new(cursor.line, cursor.col - 1))
     } else {
-        (close, open)
+        None
     };
 
-    let mut depth: i32 = 0;
-    let mut at = start;
-    loop {
-        if let Some(c) = char_at(doc, at) {
-            if c == mine {
-                depth += 1;
-            } else if c == other {
-                depth -= 1;
-                if depth == 0 {
-                    return at;
-                }
-            }
-        }
-        match step_char(doc, at, forward) {
-            Some(next) => at = next,
-            None => return from,
-        }
-        if at.line.abs_diff(start.line) > MAX_LANDMARK_LINES {
-            return from;
-        }
-    }
+    let start = bracket_pos?;
+    let partner = find_partner(doc, start)?;
+    Some((start, partner))
 }
 
 /// What a text object names, independent of where inside it the cursor is.
@@ -1026,6 +1076,54 @@ mod tests {
         assert_eq!(target(&d, at(0, 9), Motion::MatchingBracket), at(0, 9));
         let plain = doc("brackets-none.txt", "nothing here\n");
         assert_eq!(target(&plain, at(0, 0), Motion::MatchingBracket), at(0, 0));
+    }
+
+    #[test]
+    fn find_matching_pair_finds_brackets_on_and_beside_cursor() {
+        let d = doc("find-pair.txt", "fn f(a, [b]) { g() }\n");
+        // Cursor directly on '(' (0, 4)
+        assert_eq!(
+            find_matching_pair(&d, at(0, 4)),
+            Some((at(0, 4), at(0, 11)))
+        );
+        // Cursor directly on ')' (0, 11)
+        assert_eq!(
+            find_matching_pair(&d, at(0, 11)),
+            Some((at(0, 11), at(0, 4)))
+        );
+        // Cursor beside '(' (inside at 0, 5)
+        assert_eq!(
+            find_matching_pair(&d, at(0, 5)),
+            Some((at(0, 4), at(0, 11)))
+        );
+        // Cursor beside ')' (after at 0, 12)
+        assert_eq!(
+            find_matching_pair(&d, at(0, 12)),
+            Some((at(0, 11), at(0, 4)))
+        );
+        // Cursor on square brackets
+        assert_eq!(
+            find_matching_pair(&d, at(0, 8)),
+            Some((at(0, 8), at(0, 10)))
+        );
+        // Cursor on curly braces
+        assert_eq!(
+            find_matching_pair(&d, at(0, 13)),
+            Some((at(0, 13), at(0, 19)))
+        );
+        // Cursor on plain text away from brackets
+        assert_eq!(find_matching_pair(&d, at(0, 0)), None);
+    }
+
+    #[test]
+    fn find_matching_pair_multi_line_and_unmatched() {
+        let d = doc("pair-multi.txt", "if (a\n  && b) {\n}\n");
+        assert_eq!(find_matching_pair(&d, at(0, 3)), Some((at(0, 3), at(1, 6))));
+        assert_eq!(find_matching_pair(&d, at(1, 6)), Some((at(1, 6), at(0, 3))));
+        assert_eq!(find_matching_pair(&d, at(1, 8)), Some((at(1, 8), at(2, 0))));
+        // Unmatched bracket
+        let unclosed = doc("pair-unclosed.txt", "unclosed (\n");
+        assert_eq!(find_matching_pair(&unclosed, at(0, 9)), None);
     }
 
     fn range(

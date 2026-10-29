@@ -68,6 +68,8 @@ pub enum Command {
     PreviousGitChange,
     /// Toggles highlighting occurrences of the word under cursor.
     ToggleWordHighlight,
+    /// Toggles highlighting of the matching bracket.
+    ToggleMatchingBracket,
     /// Toggles Zen (distraction-free) mode (`Shift+F11`, `Leader z`).
     ToggleZenMode,
     /// The help list (`Leader ?`).
@@ -116,6 +118,7 @@ impl Command {
             Command::NextGitChange => "next_git_change",
             Command::PreviousGitChange => "previous_git_change",
             Command::ToggleWordHighlight => "toggle_word_highlight",
+            Command::ToggleMatchingBracket => "toggle_matching_bracket",
             Command::ToggleZenMode => "toggle_zen_mode",
             Command::Help => "help",
             Command::Palette => "palette",
@@ -187,6 +190,10 @@ impl Command {
             "toggle_word_highlight" | "toggle_highlight_word" | "word_highlight" => {
                 Command::ToggleWordHighlight
             }
+            "toggle_matching_bracket"
+            | "toggle_bracket_highlight"
+            | "matching_bracket"
+            | "bracket_highlight" => Command::ToggleMatchingBracket,
             "toggle_zen_mode"
             | "zen_mode"
             | "zen"
@@ -629,6 +636,7 @@ mod tests {
             Command::NextGitChange,
             Command::PreviousGitChange,
             Command::ToggleWordHighlight,
+            Command::ToggleMatchingBracket,
             Command::ToggleZenMode,
             Command::Help,
             Command::Palette,

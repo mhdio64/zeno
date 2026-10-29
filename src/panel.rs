@@ -166,6 +166,11 @@ pub const ENTRIES: &[Entry] = &[
         command: Command::ToggleWordHighlight,
     },
     Entry {
+        keys: "",
+        label: "Toggle matching bracket highlight",
+        command: Command::ToggleMatchingBracket,
+    },
+    Entry {
         keys: "alt+up",
         label: "Move line up",
         command: Command::MoveLineUp,
