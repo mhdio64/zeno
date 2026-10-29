@@ -2539,6 +2539,36 @@ impl Editor {
     }
 
     fn insert_char(&mut self, c: char) {
+        if self.auto_pair
+            && let Some((start, end)) = self.selection()
+            && let Some((open, close)) = surround_pair_for(c)
+        {
+            if !self.range_is_affordable(start, end) {
+                self.message = self.too_large(start, end);
+                return;
+            }
+            let cursor_at_end = self.cursor() >= self.view.anchor.unwrap_or(start);
+            let selected = self.doc.text_in_range(start, end);
+            let wrapped = format!("{open}{selected}{close}");
+            self.doc.edit(start, end, &wrapped);
+            let new_start = Pos::new(start.line, start.col + 1);
+            let new_end = if start.line == end.line {
+                Pos::new(end.line, end.col + 1)
+            } else {
+                Pos::new(end.line, end.col)
+            };
+            if cursor_at_end {
+                self.view.anchor = Some(new_start);
+                self.move_to(new_end);
+            } else {
+                self.view.anchor = Some(new_end);
+                self.move_to(new_start);
+            }
+            self.ensure_cursor_visible();
+            self.dirty = true;
+            self.message.clear();
+            return;
+        }
         // Typing the closing half of a pair that is already there steps over
         // it instead of doubling it, which is what the hands expect before
         // they have looked at what is next.
@@ -2561,9 +2591,10 @@ impl Editor {
     /// The character that would complete the pair `c` opens, if it is
     /// unambiguous that one is wanted (spec §4.9).
     ///
-    /// Nothing is paired over a selection (typing replaces it), next to a word
-    /// or a closer (there the user is editing text, not opening a block), or
-    /// for a quote between two letters, which is an apostrophe.
+    /// Paired characters over a selection surround the selection instead.
+    /// Nothing is paired next to a word or a closer (there the user is
+    /// editing text, not opening a block), or for a quote between two
+    /// letters, which is an apostrophe.
     fn partner_for(&self, c: char) -> Option<char> {
         if !self.auto_pair || self.selection().is_some() {
             return None;
@@ -2604,7 +2635,22 @@ impl Editor {
         }
         false
     }
+}
 
+/// The opening and closing characters for surrounding a selection with `c`.
+fn surround_pair_for(c: char) -> Option<(char, char)> {
+    match c {
+        '(' | ')' => Some(('(', ')')),
+        '[' | ']' => Some(('[', ']')),
+        '{' | '}' => Some(('{', '}')),
+        '"' => Some(('"', '"')),
+        '\'' => Some(('\'', '\'')),
+        '`' => Some(('`', '`')),
+        _ => None,
+    }
+}
+
+impl Editor {
     fn insert_text(&mut self, text: &str) {
         self.insert_replacing_selection(text);
     }
@@ -6496,12 +6542,102 @@ mod tests {
     }
 
     #[test]
-    fn a_pair_is_not_put_around_a_selection() {
+    fn a_pair_surrounds_a_selection() {
         let (mut e, _p) = editor_with("pair-selection.txt", b"abc\n");
         e.view.anchor = Some(Pos::new(0, 0));
         e.view.cursor_col = 3;
         e.insert_char('(');
-        assert_eq!(line(&e, 0), "(", "typing over a selection replaces it");
+        assert_eq!(
+            line(&e, 0),
+            "(abc)",
+            "typing a bracket over a selection surrounds it"
+        );
+        assert_eq!(e.selection(), Some((Pos::new(0, 1), Pos::new(0, 4))));
+    }
+
+    #[test]
+    fn all_brackets_and_quotes_surround_a_selection() {
+        let pairs = [
+            ('(', "(abc)"),
+            (')', "(abc)"),
+            ('[', "[abc]"),
+            (']', "[abc]"),
+            ('{', "{abc}"),
+            ('}', "{abc}"),
+            ('"', "\"abc\""),
+            ('\'', "'abc'"),
+            ('`', "`abc`"),
+        ];
+        for (key, expected) in pairs {
+            let (mut e, _p) = editor_with("surround-pairs.txt", b"abc\n");
+            e.view.anchor = Some(Pos::new(0, 0));
+            e.view.cursor_col = 3;
+            e.insert_char(key);
+            assert_eq!(line(&e, 0), expected, "typing {key} should wrap selection");
+            assert_eq!(e.selection(), Some((Pos::new(0, 1), Pos::new(0, 4))));
+        }
+    }
+
+    #[test]
+    fn surround_selection_backward_preserves_cursor_direction() {
+        let (mut e, _p) = editor_with("surround-backward.txt", b"abc\n");
+        e.view.anchor = Some(Pos::new(0, 3));
+        e.view.cursor_col = 0;
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "(abc)");
+        assert_eq!(e.cursor(), Pos::new(0, 1));
+        assert_eq!(e.view.anchor, Some(Pos::new(0, 4)));
+        assert_eq!(e.selection(), Some((Pos::new(0, 1), Pos::new(0, 4))));
+    }
+
+    #[test]
+    fn surround_selection_undo_restores_in_one_step() {
+        let (mut e, _p) = editor_with("surround-undo.txt", b"abc\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_col = 3;
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "(abc)");
+        e.undo();
+        assert_eq!(line(&e, 0), "abc");
+    }
+
+    #[test]
+    fn surround_selection_nesting() {
+        let (mut e, _p) = editor_with("surround-nest.txt", b"abc\n");
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_col = 3;
+        e.insert_char('"');
+        assert_eq!(line(&e, 0), "\"abc\"");
+        assert_eq!(e.selection(), Some((Pos::new(0, 1), Pos::new(0, 4))));
+        e.insert_char('(');
+        assert_eq!(line(&e, 0), "\"(abc)\"");
+        assert_eq!(e.selection(), Some((Pos::new(0, 2), Pos::new(0, 5))));
+    }
+
+    #[test]
+    fn surround_selection_multi_line() {
+        let (mut e, _p) = editor_with("surround-multi.txt", b"hello\nworld\n");
+        e.view.anchor = Some(Pos::new(0, 1));
+        e.view.cursor_line = 1;
+        e.view.cursor_col = 3;
+        e.insert_char('[');
+        assert_eq!(line(&e, 0), "h[ello");
+        assert_eq!(line(&e, 1), "wor]ld");
+        assert_eq!(e.selection(), Some((Pos::new(0, 2), Pos::new(1, 3))));
+    }
+
+    #[test]
+    fn surround_selection_disabled_when_auto_pair_is_false() {
+        let (mut e, _p) = editor_with("surround-disabled.txt", b"abc\n");
+        e.auto_pair = false;
+        e.view.anchor = Some(Pos::new(0, 0));
+        e.view.cursor_col = 3;
+        e.insert_char('(');
+        assert_eq!(
+            line(&e, 0),
+            "(",
+            "typing over a selection replaces it when auto_pair is off"
+        );
     }
 
     #[test]
