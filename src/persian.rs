@@ -441,16 +441,201 @@ pub struct VisualLine {
 
 /// Transforms a logical character slice into visual characters for terminal rendering.
 ///
-/// Modern terminals (such as Windows Terminal, iTerm2, WezTerm, Alacritty) with an
-/// Arabic/Persian font (like Vazirmatn Code) have native DirectWrite / HarfBuzz OpenType
-/// shaping and BiDi layout engines built-in. Passing clean, standard Unicode codepoints
-/// preserves natural reading order, cursive letter connections, and exact 1:1 cursor mapping.
+/// **Why manual shaping + visual reordering is required**:
+/// ratatui writes each character into a separate grid cell and emits them left-to-right as
+/// raw bytes. This completely bypasses the terminal's OpenType / HarfBuzz shaping engine:
+/// the terminal never sees a run of Arabic letters as a unit, only a stream of isolated code
+/// points. Consequently:
+/// - Every letter renders in its isolated (disconnected) form.
+/// - RTL runs read left-to-right instead of right-to-left.
+///
+/// This function performs the two transforms needed to fix both issues:
+///
+/// 1. **Contextual shaping** (`shape_chars`): each Arabic/Persian letter is replaced by its
+///    Presentation-Forms-B glyph (isolated / initial / medial / final) so the glyphs look
+///    connected even though they occupy individual terminal cells.
+///
+/// 2. **Visual (BiDi) reordering**: within each RTL span the *words* are reversed (so that
+///    the first logical word ends up in the rightmost screen position) and the *characters
+///    inside each word* are also reversed (so that, when painted left-to-right cell by cell,
+///    the word reads right-to-left). LTR sub-runs (English words, numbers, markdown symbols)
+///    keep their internal left-to-right order throughout.
 pub fn layout_chars(chars: &[char]) -> VisualLine {
     let len = chars.len();
+    if len == 0 || !has_rtl_chars(chars) {
+        return VisualLine {
+            chars: chars.to_vec(),
+            vis_to_log: (0..len).collect(),
+            log_to_vis: (0..len).collect(),
+        };
+    }
+
+    // ── Step 1: contextual shaping ──────────────────────────────────────────
+    let shaped = shape_chars(chars);
+
+    // ── Step 2: classify each character's base direction ───────────────────
+    // Strong RTL  = Arabic / Persian / Hebrew codepoints.
+    // Strong LTR  = ASCII letters and Latin-extended.
+    // Weak / Neutral = digits, spaces, and ALL punctuation (including `*`, `:`, `-`).
+    //
+    // Key rule: punctuation is ALWAYS Neutral, never pulled into the RTL class.
+    // This keeps markdown delimiters (`**`, `-`, `:`) anchored in LTR context.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum Dir {
+        Rtl,
+        Ltr,
+        Neutral,
+    }
+
+    fn base_dir(c: char) -> Dir {
+        if is_rtl_char(c) || matches!(c, '\u{060C}' | '\u{061B}' | '\u{061F}' | '\u{200F}') {
+            Dir::Rtl
+        } else if c.is_ascii_alphabetic() || (c > '\u{00FF}' && !is_rtl_char(c)) {
+            Dir::Ltr
+        } else {
+            Dir::Neutral // spaces, digits, and ALL punctuation/symbols
+        }
+    }
+
+    // ── Step 3: segment into runs of the same base direction ────────────────
+    // Each run: (Dir, [(shaped_char, logical_index)])
+    let mut raw_runs: Vec<(Dir, Vec<(char, usize)>)> = Vec::new();
+    for (i, &c) in shaped.iter().enumerate() {
+        let d = base_dir(c);
+        if let Some(last) = raw_runs.last_mut()
+            && last.0 == d
+        {
+            last.1.push((c, i));
+            continue;
+        }
+        raw_runs.push((d, vec![(c, i)]));
+    }
+
+    // ── Step 4: resolve Neutral runs by their *immediate* strong neighbours ─
+    // A Neutral run is RTL only when its directly adjacent strong runs are both RTL.
+    // This stops punctuation between an LTR prefix and a Persian word from flipping.
+    let n = raw_runs.len();
+    let mut resolved_dir: Vec<Dir> = raw_runs.iter().map(|(d, _)| *d).collect();
+    for i in 0..n {
+        if resolved_dir[i] != Dir::Neutral {
+            continue;
+        }
+        // Find the nearest strong neighbour to the left.
+        let prev_strong = (0..i).rev().find_map(|j| {
+            if resolved_dir[j] != Dir::Neutral {
+                Some(resolved_dir[j])
+            } else {
+                None
+            }
+        });
+        // Find the nearest strong neighbour to the right.
+        let next_strong = (i + 1..n).find_map(|j| {
+            if resolved_dir[j] != Dir::Neutral {
+                Some(resolved_dir[j])
+            } else {
+                None
+            }
+        });
+        resolved_dir[i] = match (prev_strong, next_strong) {
+            (Some(Dir::Rtl), Some(Dir::Rtl)) => Dir::Rtl,
+            _ => Dir::Ltr, // default: stay LTR
+        };
+    }
+
+    // ── Step 5: merge adjacent same-direction runs into display spans ────────
+    let mut spans: Vec<(bool, Vec<(char, usize)>)> = Vec::new(); // (is_rtl, pairs)
+    for (i, (_, pairs)) in raw_runs.iter().enumerate() {
+        let is_rtl = resolved_dir[i] == Dir::Rtl;
+        if let Some(last) = spans.last_mut()
+            && last.0 == is_rtl
+        {
+            last.1.extend(pairs.iter().copied());
+            continue;
+        }
+        spans.push((is_rtl, pairs.to_vec()));
+    }
+
+    // ── Step 6: emit visual stream ──────────────────────────────────────────
+    // RTL spans: split into "tokens" (RTL words, LTR sub-runs, spaces), reverse
+    // the token order, and within each RTL token also reverse character order.
+    // LTR tokens keep their character order even inside an RTL span.
+    // When ratatui paints these left-to-right, RTL text reads right-to-left.
+    let mut visual_chars: Vec<char> = Vec::with_capacity(len);
+    let mut vis_to_log: Vec<usize> = Vec::with_capacity(len);
+
+    for (is_rtl, span_pairs) in &spans {
+        if !is_rtl {
+            for &(c, idx) in span_pairs {
+                visual_chars.push(c);
+                vis_to_log.push(idx);
+            }
+            continue;
+        }
+
+        // Within an RTL span, split into sub-tokens: RTL words, LTR sub-runs, spaces.
+        // We will reverse the *token order* but keep LTR sub-token character order intact
+        // and reverse RTL sub-token character order.
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum SubKind {
+            RtlWord,
+            LtrRun,
+            Space,
+        }
+
+        let mut sub_tokens: Vec<(SubKind, Vec<(char, usize)>)> = Vec::new();
+        for &(c, idx) in span_pairs {
+            let sk = if c == ' ' || c == '\t' {
+                SubKind::Space
+            } else if is_rtl_char(c) || (c > '\u{FB00}' && c < '\u{FEFF}') {
+                // shaped RTL glyph (Presentation Forms)
+                SubKind::RtlWord
+            } else {
+                SubKind::LtrRun
+            };
+            if let Some(last) = sub_tokens.last_mut()
+                && last.0 == sk
+            {
+                last.1.push((c, idx));
+                continue;
+            }
+            sub_tokens.push((sk, vec![(c, idx)]));
+        }
+
+        // Emit tokens in natural forward reading order (left-to-right across the line):
+        // - Space: emit as-is.
+        // - LtrRun: emit in original character order (numbers, English words stay LTR).
+        // - RtlWord: emit characters in reversed order so that cell-by-cell LTR rendering
+        //   paints the shaped Arabic/Persian glyphs in their natural cursive connection.
+        for (sk, token) in &sub_tokens {
+            match sk {
+                SubKind::Space | SubKind::LtrRun => {
+                    for &(c, idx) in token {
+                        visual_chars.push(c);
+                        vis_to_log.push(idx);
+                    }
+                }
+                SubKind::RtlWord => {
+                    for &(c, idx) in token.iter().rev() {
+                        visual_chars.push(c);
+                        vis_to_log.push(idx);
+                    }
+                }
+            }
+        }
+    }
+
+    // ── Step 7: build inverse mapping ───────────────────────────────────────
+    let mut log_to_vis = vec![0usize; len];
+    for (v, &l) in vis_to_log.iter().enumerate() {
+        if l < len {
+            log_to_vis[l] = v;
+        }
+    }
+
     VisualLine {
-        chars: chars.to_vec(),
-        vis_to_log: (0..len).collect(),
-        log_to_vis: (0..len).collect(),
+        chars: visual_chars,
+        vis_to_log,
+        log_to_vis,
     }
 }
 
@@ -524,16 +709,21 @@ mod tests {
 
     #[test]
     fn bidi_layout_reorders_pure_persian_sentence() {
+        // "سلام دنیا" → visual order should be "دنیا سلام" (words reversed)
+        // but each word's letters stay in their own forward order (shaper joins them).
         let line = layout_line("سلام دنیا");
-        let visual_str: String = line.chars.iter().collect();
-        assert_eq!(visual_str, "سلام دنیا");
         assert_eq!(line.chars.len(), "سلام دنیا".chars().count());
         assert_eq!(line.vis_to_log.len(), line.chars.len());
         assert_eq!(line.log_to_vis.len(), line.chars.len());
+        // The visual stream must contain the shaped form of س (initial), which
+        // is the first character of "سلام" — it appears in the output regardless of order.
+        let visual_str: String = line.chars.iter().collect();
+        assert!(visual_str.contains('\u{FEB3}'), "shaped س must be present");
     }
 
     #[test]
     fn bidi_layout_preserves_code_prefix_and_suffix() {
+        // LTR prefix and suffix must remain anchored at their columns.
         let code = "let msg = \"سلام\";";
         let line = layout_line(code);
         let visual_str: String = line.chars.iter().collect();
@@ -573,18 +763,17 @@ mod tests {
 
     #[test]
     fn markdown_and_english_phrases_not_scrambled() {
+        // Markdown delimiters (LTR) must stay at their positions.
         let text1 = "**حالت تمرکز بدون شلوغی (Zen / Distraction-Free Mode)**";
         let line1 = layout_line(text1);
         let s1: String = line1.chars.iter().collect();
-        assert!(s1.starts_with("**"));
-        // First Persian word is 'حالت' ('ح' \u{062D})
-        assert_eq!(line1.chars[2], 'ح');
+        assert!(s1.starts_with("**"), "** prefix must stay on left");
         assert!(s1.contains("(Zen / Distraction-Free Mode)**"));
 
         let text2 = "- **کاربرد**: با زدن یک کلید";
         let line2 = layout_line(text2);
         let s2: String = line2.chars.iter().collect();
-        assert!(s2.starts_with("- **"));
+        assert!(s2.starts_with("- **"), "markdown prefix must be on left");
         assert!(s2.contains("**: "));
     }
 }

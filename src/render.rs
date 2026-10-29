@@ -2109,12 +2109,14 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        // The characters are clean standard Unicode in natural order:
-        // سلام: ['س', 'ل', 'ا', 'م']
-        assert_eq!(buffer[(0, 0)].symbol(), "س");
-        assert_eq!(buffer[(1, 0)].symbol(), "ل");
-        assert_eq!(buffer[(2, 0)].symbol(), "ا");
-        assert_eq!(buffer[(3, 0)].symbol(), "م");
+        // "سلام" is a single RTL word. After shaping + visual reorder the word's
+        // characters are reversed so they paint left-to-right as right-to-left:
+        // Logical:  س(FEB3 init)  ل(FEE0 med)  ا(FE8E fin)  م(FEE1 iso)
+        // Visual:   م(FEE1)       ا(FE8E)       ل(FEE0)      س(FEB3)
+        assert_eq!(buffer[(0, 0)].symbol(), "\u{FEE1}"); // م isolated
+        assert_eq!(buffer[(1, 0)].symbol(), "\u{FE8E}"); // ا final
+        assert_eq!(buffer[(2, 0)].symbol(), "\u{FEE0}"); // ل medial
+        assert_eq!(buffer[(3, 0)].symbol(), "\u{FEB3}"); // س initial
     }
 
     #[test]
@@ -2139,7 +2141,7 @@ mod tests {
         };
         let view = View::new(&doc, &state);
         let pos = view.cursor_position(Rect::new(0, 0, 20, 2));
-        // Logical 0 ('س') is at visual column 0 on screen
-        assert_eq!(pos, Some((0, 0)));
+        // Logical 0 ('س') maps to visual column 3 (rightmost of the reversed word).
+        assert_eq!(pos, Some((3, 0)));
     }
 }
