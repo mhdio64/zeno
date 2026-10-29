@@ -3774,23 +3774,53 @@ impl Editor {
         let trailing = self.doc.ends_with_newline();
         let count = self.doc.line_count();
 
-        if let Some(parent) = target_path.parent()
+        // If the target is a symlink, resolve to the real file so atomic rename
+        // updates the target without replacing/severing the symlink.
+        let actual_target = target_path
+            .canonicalize()
+            .unwrap_or_else(|_| target_path.to_path_buf());
+
+        if let Some(parent) = actual_target.parent()
             && !parent.as_os_str().is_empty()
             && !parent.exists()
         {
             let _ = fs::create_dir_all(parent);
         }
 
-        let dir = target_path.parent().filter(|p| !p.as_os_str().is_empty());
-        let tmp_name = match target_path.file_name() {
-            Some(name) => dir
-                .unwrap_or_else(|| Path::new("."))
-                .join(format!(".{}.zeno.tmp", name.to_string_lossy())),
+        let existing_permissions = fs::metadata(&actual_target).ok().map(|m| m.permissions());
+
+        let dir = actual_target.parent().filter(|p| !p.as_os_str().is_empty());
+        let file_stem = match actual_target.file_name() {
+            Some(name) => name.to_string_lossy().to_string(),
             None => return Err("cannot save a file without a name".into()),
         };
 
-        let mut file =
-            fs::File::create(&tmp_name).map_err(|e| format!("{}: {e}", tmp_name.display()))?;
+        // Create temporary file with atomic `create_new(true)` to prevent symlink attacks.
+        let mut attempts = 0;
+        let (mut file, tmp_name) = loop {
+            attempts += 1;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let name = format!(
+                ".{file_stem}.{}-{}-{attempts}.zeno.tmp",
+                std::process::id(),
+                now
+            );
+            let candidate = dir.unwrap_or_else(|| Path::new(".")).join(name);
+
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(f) => break (f, candidate),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 10 => continue,
+                Err(e) => return Err(format!("{}: {e}", candidate.display())),
+            }
+        };
+
         let mut out = io::BufWriter::with_capacity(1 << 20, &mut file);
         for line in 0..count {
             let text = self.doc.line_text(line).unwrap_or_default();
@@ -3805,9 +3835,14 @@ impl Editor {
         file.sync_all().map_err(|e| e.to_string())?;
         drop(file);
 
-        fs::rename(&tmp_name, target_path).map_err(|e| {
+        // Preserve original file permissions (e.g. 0600 on sensitive keys/configs)
+        if let Some(perms) = existing_permissions {
+            let _ = fs::set_permissions(&tmp_name, perms);
+        }
+
+        fs::rename(&tmp_name, &actual_target).map_err(|e| {
             let _ = fs::remove_file(&tmp_name);
-            format!("{}: {e}", target_path.display())
+            format!("{}: {e}", actual_target.display())
         })?;
         Ok(())
     }
@@ -4474,12 +4509,32 @@ mod tests {
     fn saving_leaves_no_temporary_file_behind() {
         let (mut e, path) = editor_with("save-tmp.txt", b"one\n");
         e.save();
-        // Only this test's own temporary file matters. The directory is
-        // shared with the other saving tests, which run in parallel and may
-        // legitimately be mid-write, so a directory-wide scan is racy.
-        let tmp = path.parent().unwrap().join(".save-tmp.txt.zeno.tmp");
-        assert!(!tmp.exists(), "{} was left behind", tmp.display());
+        let parent = path.parent().unwrap();
+        let remaining: Vec<_> = std::fs::read_dir(parent)
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                let name = entry.file_name().to_string_lossy().to_string();
+                name.starts_with(".save-tmp.txt.") && name.ends_with(".zeno.tmp")
+            })
+            .collect();
+        assert!(remaining.is_empty(), "{:?} was left behind", remaining);
         assert_eq!(std::fs::read(&path).unwrap(), b"one\n");
+    }
+
+    #[test]
+    fn saving_preserves_file_permissions() {
+        let (mut e, path) = editor_with("perms.txt", b"secret\n");
+        let orig_perms = std::fs::metadata(&path).unwrap().permissions();
+        e.insert_char('X');
+        e.save();
+        let new_perms = std::fs::metadata(&path).unwrap().permissions();
+        assert_eq!(orig_perms.readonly(), new_perms.readonly());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(orig_perms.mode(), new_perms.mode());
+        }
     }
 
     #[test]

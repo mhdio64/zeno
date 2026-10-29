@@ -264,8 +264,18 @@ fn relative_git_path(repo_root: &Path, file_path: &Path) -> Option<String> {
         std::env::current_dir().ok()?.join(file_path)
     };
 
-    let rel = abs.strip_prefix(repo_root).ok()?;
+    let rel = if let Ok(rel) = abs.strip_prefix(repo_root) {
+        rel.to_path_buf()
+    } else if let (Ok(canon_abs), Ok(canon_root)) = (abs.canonicalize(), repo_root.canonicalize()) {
+        canon_abs.strip_prefix(&canon_root).ok()?.to_path_buf()
+    } else {
+        return None;
+    };
+
     let s = rel.to_str()?;
+    if s.split(['/', '\\']).any(|seg| seg == "..") {
+        return None;
+    }
     Some(s.replace('\\', "/"))
 }
 
@@ -297,7 +307,7 @@ fn is_untracked(repo_root: &Path, rel_path: &str) -> bool {
     let output = std::process::Command::new("git")
         .arg("-C")
         .arg(repo_root)
-        .args(["ls-files", rel_path])
+        .args(["ls-files", "--", rel_path])
         .output();
 
     match output {
@@ -697,5 +707,23 @@ mod tests {
         assert_eq!(state.previous_hunk_index(12), Some((0, false)));
         // Backward from line 10 -> wraps to Hunk 2 (40)
         assert_eq!(state.previous_hunk_index(10), Some((2, true)));
+    }
+
+    #[test]
+    fn relative_git_path_rejects_traversal_and_resolves_valid_path() {
+        let repo = std::env::temp_dir().join("zeno_test_repo");
+        let valid = repo.join("src").join("main.rs");
+        assert_eq!(
+            relative_git_path(&repo, &valid),
+            Some("src/main.rs".to_string())
+        );
+
+        let traversal = repo
+            .join("src")
+            .join("..")
+            .join("..")
+            .join("etc")
+            .join("passwd");
+        assert_eq!(relative_git_path(&repo, &traversal), None);
     }
 }

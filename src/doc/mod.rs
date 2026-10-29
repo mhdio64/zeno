@@ -161,10 +161,36 @@ pub fn identity_of(path: &Path) -> std::io::Result<FileIdentity> {
 impl Doc {
     /// Creates an empty document with no backing file on disk.
     pub fn empty() -> std::io::Result<Self> {
-        let path = std::env::temp_dir().join(format!("zeno-empty-{}.tmp", std::process::id()));
-        let file = File::create(&path)?;
+        let mut attempts = 0;
+        let file = loop {
+            attempts += 1;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let path = std::env::temp_dir().join(format!(
+                "zeno-empty-{}-{}-{}.tmp",
+                std::process::id(),
+                now,
+                attempts
+            ));
+            match std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(file) => {
+                    let _ = std::fs::remove_file(&path);
+                    break file;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 10 => {
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        };
         let mmap = Arc::new(unsafe { Mmap::map(&file)? });
-        let _ = std::fs::remove_file(&path);
         Ok(Self {
             index: Arc::new(LineIndex::new(0)),
             overlay: Overlay::new(),
@@ -188,6 +214,12 @@ impl Doc {
             Err(e) => return Err(e),
         };
         let meta = file.metadata()?;
+        if !meta.is_file() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "not a regular file",
+            ));
+        }
         let len = meta.len();
         let identity = FileIdentity {
             len,
@@ -599,6 +631,15 @@ mod tests {
         let path = temp_file("empty_zero_bytes.txt", b"");
         let doc = Doc::open(&path);
         assert!(doc.is_ok(), "opening empty file failed: {:?}", doc.err());
+    }
+
+    #[test]
+    fn open_directory_returns_error() {
+        let dir = std::env::temp_dir().join("zeno-doc-tests-dir");
+        let _ = std::fs::create_dir_all(&dir);
+        let res = Doc::open(&dir);
+        assert!(res.is_err(), "opening directory must return error");
+        let _ = std::fs::remove_dir(&dir);
     }
 
     #[test]
