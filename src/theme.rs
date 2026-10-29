@@ -79,15 +79,15 @@ pub struct ThemeColors {
 
 impl ThemeColors {
     pub const DARK_MODERN: Self = Self {
-        bg: Color::Rgb(31, 31, 31),
-        fg: Color::Rgb(204, 204, 204),
-        line_highlight: Color::Rgb(42, 45, 46),
+        bg: Color::Black,
+        fg: Color::Rgb(224, 224, 224),
+        line_highlight: Color::Rgb(24, 24, 24),
         selection_bg: Color::Rgb(38, 79, 120),
         selection_fg: Color::White,
-        gutter_fg: Color::Rgb(110, 118, 129),
-        gutter_bg: Color::Rgb(31, 31, 31),
-        status_bg: Color::Rgb(24, 24, 24),
-        status_fg: Color::Rgb(204, 204, 204),
+        gutter_fg: Color::Rgb(125, 130, 140),
+        gutter_bg: Color::Black,
+        status_bg: Color::Rgb(14, 14, 14),
+        status_fg: Color::Rgb(215, 215, 215),
         is_dark: true,
     };
 
@@ -522,9 +522,9 @@ mod tests {
     fn theme_colors_resolve_curated_palettes() {
         let dark_modern = ThemeColors::for_theme(Some("Dark Modern"));
         assert_eq!(dark_modern, ThemeColors::DARK_MODERN);
-        assert_eq!(dark_modern.bg, Color::Rgb(31, 31, 31));
-        assert_eq!(dark_modern.fg, Color::Rgb(204, 204, 204));
-        assert_eq!(dark_modern.line_highlight, Color::Rgb(42, 45, 46));
+        assert_eq!(dark_modern.bg, Color::Black);
+        assert_eq!(dark_modern.fg, Color::Rgb(224, 224, 224));
+        assert_eq!(dark_modern.line_highlight, Color::Rgb(24, 24, 24));
         assert_eq!(dark_modern.selection_bg, Color::Rgb(38, 79, 120));
         assert!(dark_modern.is_dark);
 

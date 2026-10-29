@@ -78,11 +78,11 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>background</key>
-                <string>#1F1F1F</string>
+                <string>#000000</string>
                 <key>foreground</key>
-                <string>#CCCCCC</string>
+                <string>#E0E0E0</string>
                 <key>lineHighlight</key>
-                <string>#2A2D2E</string>
+                <string>#181818</string>
                 <key>selection</key>
                 <string>#264F78</string>
             </dict>
@@ -95,7 +95,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#6A9955</string>
+                <string>#72B35B</string>
             </dict>
         </dict>
         <dict>
@@ -106,7 +106,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#CE9178</string>
+                <string>#E29878</string>
             </dict>
         </dict>
         <dict>
@@ -117,7 +117,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#D7BA7D</string>
+                <string>#E8C87E</string>
             </dict>
         </dict>
         <dict>
@@ -128,7 +128,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#B5CEA8</string>
+                <string>#BFE2B0</string>
             </dict>
         </dict>
         <dict>
@@ -139,7 +139,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#569CD6</string>
+                <string>#5DA8ED</string>
             </dict>
         </dict>
         <dict>
@@ -150,7 +150,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#C586C0</string>
+                <string>#D888D4</string>
             </dict>
         </dict>
         <dict>
@@ -161,7 +161,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#569CD6</string>
+                <string>#5DA8ED</string>
             </dict>
         </dict>
         <dict>
@@ -172,7 +172,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#DCDCAA</string>
+                <string>#ECECA0</string>
             </dict>
         </dict>
         <dict>
@@ -183,7 +183,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#4EC9B0</string>
+                <string>#4FE0BF</string>
             </dict>
         </dict>
         <dict>
@@ -194,7 +194,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#9CDCFE</string>
+                <string>#A3E2FF</string>
             </dict>
         </dict>
         <dict>
@@ -205,7 +205,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#9CDCFE</string>
+                <string>#A3E2FF</string>
             </dict>
         </dict>
         <dict>
@@ -216,7 +216,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#569CD6</string>
+                <string>#5DA8ED</string>
             </dict>
         </dict>
         <dict>
@@ -227,7 +227,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#9CDCFE</string>
+                <string>#A3E2FF</string>
             </dict>
         </dict>
         <dict>
@@ -238,7 +238,7 @@ const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
             <key>settings</key>
             <dict>
                 <key>foreground</key>
-                <string>#D4D4D4</string>
+                <string>#E2E2E2</string>
             </dict>
         </dict>
     </array>
