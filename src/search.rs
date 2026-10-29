@@ -272,11 +272,14 @@ impl SearchJob {
         let cancel = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&cancel);
         let (sender, receiver) = channel();
-        let handle = std::thread::spawn(move || scan(context, pattern, scope, flag, sender));
+        let handle = std::thread::Builder::new()
+            .name("zeno-search".into())
+            .spawn(move || scan(context, pattern, scope, flag, sender))
+            .ok();
         Self {
             cancel,
             receiver,
-            handle: Some(handle),
+            handle,
         }
     }
 

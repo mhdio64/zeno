@@ -166,7 +166,38 @@ fn closes_itself(before: &str, after: Option<char>) -> bool {
     after == Some(closer)
 }
 
+/// An RAII guard ensuring the terminal always exits raw mode and alternate screen on drop.
+struct RawModeGuard;
+
+impl Drop for RawModeGuard {
+    fn drop(&mut self) {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste,
+            crossterm::cursor::Show
+        );
+    }
+}
+
+/// Installs a panic hook that resets the terminal to a clean state before reporting the panic.
+fn install_panic_hook() {
+    let original = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = disable_raw_mode();
+        let _ = execute!(
+            io::stdout(),
+            LeaveAlternateScreen,
+            DisableBracketedPaste,
+            crossterm::cursor::Show
+        );
+        original(info);
+    }));
+}
+
 fn main() -> ExitCode {
+    install_panic_hook();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let mut path: Option<PathBuf> = None;
     let mut background_index = true;
@@ -327,24 +358,38 @@ fn run_stdin(force: bool) -> Result<(), String> {
         .map_err(|e| format!("reading stdin: {e}"))?;
     let directory = std::env::temp_dir();
     let pid = std::process::id();
-    let spool = directory.join(format!("zeno-stdin-{pid}.txt"));
-    fs::write(&spool, &buffer).map_err(|e| format!("spooling stdin: {e}"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let spool = directory.join(format!("zeno-stdin-{pid}-{now}.txt"));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&spool)
+        .and_then(|mut f| f.write_all(&buffer))
+        .map_err(|e| format!("spooling stdin: {e}"))?;
 
     let edited = if io::stdin().is_terminal() {
         edit_spooled(&spool, force, None)
     } else {
-        let result = directory.join(format!("zeno-stdin-{pid}.out"));
+        let result = directory.join(format!("zeno-stdin-{pid}-{now}.out"));
         let _ = fs::remove_file(&result);
-        edit_on_terminal(&spool, &result, force)
-            .and_then(|()| fs::read(&result).map_err(|e| format!("reading the buffer back: {e}")))
+        let res = edit_on_terminal(&spool, &result, force)
+            .and_then(|()| fs::read(&result).map_err(|e| format!("reading the buffer back: {e}")));
+        let _ = fs::remove_file(&result);
+        res
     };
     let _ = fs::remove_file(&spool);
     let text = edited?;
 
     let mut out = io::stdout();
-    out.write_all(&text)
-        .and_then(|()| out.flush())
-        .map_err(|e| format!("writing stdout: {e}"))
+    if let Err(e) = out.write_all(&text).and_then(|()| out.flush())
+        && e.kind() != io::ErrorKind::BrokenPipe
+    {
+        return Err(format!("writing stdout: {e}"));
+    }
+    Ok(())
 }
 
 /// Edits a spooled document, writing the buffer to `result` when given.
@@ -645,6 +690,7 @@ impl Editor {
 
     fn run(&mut self) -> Result<(), String> {
         enable_raw_mode().map_err(|e| e.to_string())?;
+        let _guard = RawModeGuard;
         let mut stdout = io::stdout();
         execute!(stdout, EnterAlternateScreen, EnableBracketedPaste).map_err(|e| e.to_string())?;
         let backend = CrosstermBackend::new(stdout);
@@ -652,14 +698,7 @@ impl Editor {
 
         let result = self.event_loop(&mut terminal);
 
-        disable_raw_mode().ok();
-        execute!(
-            terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableBracketedPaste
-        )
-        .ok();
-        terminal.show_cursor().ok();
+        drop(_guard);
 
         result
     }
@@ -706,7 +745,9 @@ impl Editor {
                     self.last_key = std::time::Instant::now();
                     self.handle_paste(&text);
                 }
-                Event::Resize(_, _) => {}
+                Event::Resize(_, _) => {
+                    self.draw(terminal).map_err(|e| e.to_string())?;
+                }
                 _ => {}
             }
             self.draw(terminal).map_err(|e| e.to_string())?;
@@ -3992,7 +4033,7 @@ impl Editor {
         let percent = if lines <= 1 {
             100
         } else {
-            (((self.view.cursor_line + 1) * 100) / lines).min(100)
+            ((self.view.cursor_line + 1).saturating_mul(100) / lines).min(100)
         };
         spans.push(Span::raw("  "));
         spans.push(Span::raw(format!("{percent}%")));
@@ -7300,5 +7341,19 @@ trim_trailing_whitespace = true
         e.set_cursor_col(9); // at the end of the line
         e.delete_word_before();
         assert_eq!(e.doc.line_text(0).unwrap(), "سلام ");
+    }
+
+    #[test]
+    fn raw_mode_guard_drops_cleanly() {
+        {
+            let _guard = RawModeGuard;
+        }
+    }
+
+    #[test]
+    fn status_line_percentage_does_not_overflow_on_huge_line() {
+        let (mut e, _p) = editor_with("huge.txt", b"one\ntwo\n");
+        e.view.cursor_line = u64::MAX - 1;
+        let _line = e.status_line();
     }
 }

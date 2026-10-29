@@ -908,7 +908,7 @@ impl Widget for View<'_> {
                 .max(self.state.top_line + area.height as u64);
             let height = area.height as usize;
             let thumb_height =
-                ((height as u64 * height as u64) / total).clamp(1, height as u64) as usize;
+                ((height as u64 * height as u64) / total.max(1)).clamp(1, height as u64) as usize;
             let max_top = total.saturating_sub(area.height as u64);
             let track_room = height.saturating_sub(thumb_height);
             let dividend = (self.state.top_line * track_room as u64) + max_top / 2;

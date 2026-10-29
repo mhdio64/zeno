@@ -567,13 +567,13 @@ impl Highlighter {
             std::thread::Builder::new()
                 .name("zeno-highlight".into())
                 .spawn(move || work(request_rx, colour_tx, epoch, path, theme))
-                .expect("a thread to highlight with")
+                .ok()
         };
         let theme_colors = ThemeColors::for_theme(theme.as_deref());
         Self {
             requests,
             colours,
-            worker: Some(worker),
+            worker,
             epoch,
             asked: None,
             lines: Highlighted::new(),
