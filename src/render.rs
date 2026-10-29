@@ -1107,8 +1107,11 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let is_selected =
-            |x: u16| buffer[(4 + x, 0)].bg == Color::White && buffer[(4 + x, 0)].fg == Color::Black;
+        let default_theme = ThemeColors::default();
+        let is_selected = |x: u16| {
+            buffer[(4 + x, 0)].bg == default_theme.selection_bg
+                && buffer[(4 + x, 0)].fg == default_theme.selection_fg
+        };
         assert!(!is_selected(0), "'a' is outside the selection");
         assert!(
             is_selected(1) && is_selected(2) && is_selected(3),
@@ -1244,12 +1247,17 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
+        let default_theme = ThemeColors::default();
         assert_eq!(
             buffer[(6, 0)].bg,
-            Color::White,
-            "the selection is painted with a white background"
+            default_theme.selection_bg,
+            "the selection is painted with theme selection background"
         );
-        assert_eq!(buffer[(6, 0)].fg, Color::Black, "and black foreground");
+        assert_eq!(
+            buffer[(6, 0)].fg,
+            default_theme.selection_fg,
+            "and theme selection foreground"
+        );
         assert_eq!(
             buffer[(8, 0)].bg,
             Color::Yellow,
@@ -1364,8 +1372,11 @@ mod tests {
             })
             .unwrap();
         let buffer = terminal.backend().buffer();
-        let is_selected =
-            |x: u16| buffer[(4 + x, 0)].bg == Color::White && buffer[(4 + x, 0)].fg == Color::Black;
+        let default_theme = ThemeColors::default();
+        let is_selected = |x: u16| {
+            buffer[(4 + x, 0)].bg == default_theme.selection_bg
+                && buffer[(4 + x, 0)].fg == default_theme.selection_fg
+        };
         // The selection runs from column 12 to 18, and the window starts at
         // column 10, so it is painted five columns further right.
         assert!(!is_selected(0), "column 10 is outside the selection");
@@ -1638,14 +1649,15 @@ mod tests {
         };
         let highlight = coloured(&[(0, 5, Color::Red)]);
         let buffer = draw(&doc, &state, Some(&highlight));
+        let default_theme = ThemeColors::default();
         assert_eq!(
             buffer[(2, 0)].bg,
-            Color::White,
-            "the selection is painted with a white background"
+            default_theme.selection_bg,
+            "the selection is painted with theme selection background"
         );
         assert_eq!(
             buffer[(2, 0)].fg,
-            Color::Black,
+            default_theme.selection_fg,
             "and not in the colour of the syntax"
         );
     }
@@ -1722,7 +1734,7 @@ mod tests {
             highlight_bracket: true,
         };
         let buffer = draw(&doc, &state, None);
-        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
+        assert_eq!(buffer[(0, 0)].bg, ThemeColors::default().line_highlight);
         assert!(
             !buffer[(0, 0)].modifier.contains(Modifier::REVERSED),
             "the cursor line must not be reverse video"
@@ -1751,10 +1763,11 @@ mod tests {
             highlight_bracket: true,
         };
         let buffer = draw(&doc, &state, None);
-        assert_eq!(buffer[(0, 0)].bg, Color::Rgb(52, 55, 62));
-        assert_ne!(buffer[(0, 0)].bg, Color::White);
-        assert_eq!(buffer[(2, 0)].bg, Color::White);
-        assert_eq!(buffer[(2, 0)].fg, Color::Black);
+        let default_theme = ThemeColors::default();
+        assert_eq!(buffer[(0, 0)].bg, default_theme.line_highlight);
+        assert_ne!(buffer[(0, 0)].bg, default_theme.selection_bg);
+        assert_eq!(buffer[(2, 0)].bg, default_theme.selection_bg);
+        assert_eq!(buffer[(2, 0)].fg, default_theme.selection_fg);
     }
 
     #[test]

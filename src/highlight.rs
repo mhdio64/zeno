@@ -64,7 +64,187 @@ use crate::theme::ThemeColors;
 /// is deliberately not used: the editor keeps the terminal's own, so that
 /// the selection (which is painted in reverse video) and the cursor line stay
 /// readable.
-const THEME: &str = "base16-ocean.dark";
+const THEME: &str = "Dark Modern";
+
+const VSCODE_DARK_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>name</key>
+    <string>Dark Modern</string>
+    <key>settings</key>
+    <array>
+        <dict>
+            <key>settings</key>
+            <dict>
+                <key>background</key>
+                <string>#1F1F1F</string>
+                <key>foreground</key>
+                <string>#CCCCCC</string>
+                <key>lineHighlight</key>
+                <string>#2A2D2E</string>
+                <key>selection</key>
+                <string>#264F78</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Comment</string>
+            <key>scope</key>
+            <string>comment, punctuation.definition.comment</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#6A9955</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>String</string>
+            <key>scope</key>
+            <string>string, punctuation.definition.string</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#CE9178</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>String Escape</string>
+            <key>scope</key>
+            <string>constant.character.escape, string.regexp</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#D7BA7D</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Number</string>
+            <key>scope</key>
+            <string>constant.numeric</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#B5CEA8</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Built-in Constant</string>
+            <key>scope</key>
+            <string>constant.language</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#569CD6</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Control Keyword</string>
+            <key>scope</key>
+            <string>keyword.control</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#C586C0</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Keyword</string>
+            <key>scope</key>
+            <string>keyword, storage, storage.type, storage.modifier</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#569CD6</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Function</string>
+            <key>scope</key>
+            <string>entity.name.function, support.function, entity.name.macro</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#DCDCAA</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Type</string>
+            <key>scope</key>
+            <string>entity.name.type, entity.name.class, entity.name.struct, entity.name.enum, entity.name.trait, support.type, support.class</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#4EC9B0</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Variable</string>
+            <key>scope</key>
+            <string>variable, variable.parameter, variable.other</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#9CDCFE</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Property</string>
+            <key>scope</key>
+            <string>variable.other.property, variable.other.member, support.type.property-name</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#9CDCFE</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Tag</string>
+            <key>scope</key>
+            <string>entity.name.tag</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#569CD6</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Attribute</string>
+            <key>scope</key>
+            <string>entity.other.attribute-name</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#9CDCFE</string>
+            </dict>
+        </dict>
+        <dict>
+            <key>name</key>
+            <string>Operator</string>
+            <key>scope</key>
+            <string>keyword.operator</string>
+            <key>settings</key>
+            <dict>
+                <key>foreground</key>
+                <string>#D4D4D4</string>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>
+"#;
 
 const MONOKAI_THEME: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -817,6 +997,23 @@ fn load_themes() -> (ThemeSet, Vec<String>) {
 /// The same, reading the user's themes from one directory.
 fn load_themes_from(dir: Option<&Path>) -> (ThemeSet, Vec<String>) {
     let mut themes = ThemeSet::load_defaults();
+    if let Ok(dark_modern) =
+        ThemeSet::load_from_reader(&mut std::io::Cursor::new(VSCODE_DARK_THEME.as_bytes()))
+    {
+        themes
+            .themes
+            .insert("Dark Modern".into(), dark_modern.clone());
+        themes
+            .themes
+            .insert("dark-modern".into(), dark_modern.clone());
+        themes
+            .themes
+            .insert("Dark (Visual Studio)".into(), dark_modern.clone());
+        themes
+            .themes
+            .insert("VS Code Dark".into(), dark_modern.clone());
+        themes.themes.insert("vscode".into(), dark_modern);
+    }
     if let Ok(monokai) =
         ThemeSet::load_from_reader(&mut std::io::Cursor::new(MONOKAI_THEME.as_bytes()))
     {
@@ -1150,16 +1347,17 @@ mod tests {
     fn a_missing_theme_directory_is_the_bundled_set() {
         let (themes, user_themes) = load_themes_from(Some(Path::new("/no/such/zeno/themes")));
         assert!(user_themes.is_empty());
+        assert!(themes.themes.contains_key("Dark Modern"));
         assert!(themes.themes.contains_key("base16-ocean.dark"));
         let chosen = resolve_theme(&themes, &user_themes, None);
-        assert_eq!(chosen.name.as_deref(), Some("Base16 Ocean Dark"));
+        assert_eq!(chosen.name.as_deref(), Some("Dark Modern"));
     }
 
     #[test]
     fn resolve_theme_falls_back_gracefully_on_unknown_theme() {
         let (themes, user_themes) = load_themes_from(None);
         let chosen = resolve_theme(&themes, &user_themes, Some("completely-unknown-theme-xyz"));
-        assert_eq!(chosen.name.as_deref(), Some("Base16 Ocean Dark"));
+        assert_eq!(chosen.name.as_deref(), Some("Dark Modern"));
     }
 
     #[test]

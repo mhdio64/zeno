@@ -21,9 +21,14 @@ pub struct ThemeItem {
 /// The curated theme list: popular dark, light, and high-contrast accessibility themes.
 pub const CURATED_THEMES: &[ThemeItem] = &[
     ThemeItem {
+        id: "Dark Modern",
+        label: "Dark Modern",
+        description: "VS Code default dark",
+    },
+    ThemeItem {
         id: "base16-ocean.dark",
         label: "Ocean Dark",
-        description: "Default dark slate",
+        description: "Dark slate",
     },
     ThemeItem {
         id: "Solarized (dark)",
@@ -73,6 +78,19 @@ pub struct ThemeColors {
 }
 
 impl ThemeColors {
+    pub const DARK_MODERN: Self = Self {
+        bg: Color::Rgb(31, 31, 31),
+        fg: Color::Rgb(204, 204, 204),
+        line_highlight: Color::Rgb(42, 45, 46),
+        selection_bg: Color::Rgb(38, 79, 120),
+        selection_fg: Color::White,
+        gutter_fg: Color::Rgb(110, 118, 129),
+        gutter_bg: Color::Rgb(31, 31, 31),
+        status_bg: Color::Rgb(24, 24, 24),
+        status_fg: Color::Rgb(204, 204, 204),
+        is_dark: true,
+    };
+
     pub const OCEAN_DARK: Self = Self {
         bg: Color::Rgb(43, 48, 59),
         fg: Color::Rgb(192, 197, 206),
@@ -138,9 +156,25 @@ impl ThemeColors {
         is_dark: true,
     };
 
-    /// Resolves curated theme colors by name or ID, falling back to Ocean Dark.
+    /// Resolves curated theme colors by name or ID, falling back to Dark Modern.
     pub fn for_theme(theme_name: Option<&str>) -> Self {
         match theme_name {
+            Some(name)
+                if name.eq_ignore_ascii_case("Dark Modern")
+                    || name.eq_ignore_ascii_case("dark-modern")
+                    || name.eq_ignore_ascii_case("Dark (Visual Studio)")
+                    || name.eq_ignore_ascii_case("VS Code Dark")
+                    || name.eq_ignore_ascii_case("vscode") =>
+            {
+                Self::DARK_MODERN
+            }
+            Some(name)
+                if name.eq_ignore_ascii_case("base16-ocean.dark")
+                    || name.eq_ignore_ascii_case("Ocean Dark")
+                    || name.eq_ignore_ascii_case("ocean-dark") =>
+            {
+                Self::OCEAN_DARK
+            }
             Some(name)
                 if name.eq_ignore_ascii_case("Solarized (dark)")
                     || name.eq_ignore_ascii_case("solarized-dark")
@@ -166,7 +200,7 @@ impl ThemeColors {
             {
                 Self::HIGH_CONTRAST
             }
-            _ => Self::OCEAN_DARK,
+            _ => Self::DARK_MODERN,
         }
     }
 
@@ -222,7 +256,7 @@ impl ThemeColors {
 
 impl Default for ThemeColors {
     fn default() -> Self {
-        Self::OCEAN_DARK
+        Self::DARK_MODERN
     }
 }
 
@@ -247,7 +281,7 @@ impl ThemePicker {
         let items: Vec<ThemeItem> = CURATED_THEMES.to_vec();
         let matches = (0..items.len()).collect();
 
-        let active_id = active_theme.unwrap_or("base16-ocean.dark");
+        let active_id = active_theme.unwrap_or("Dark Modern");
         let initial_selected = items
             .iter()
             .position(|item| {
@@ -368,10 +402,7 @@ pub fn theme_lines(picker: &ThemePicker, height: usize) -> Vec<Line<'static>> {
 
     let room = height.saturating_sub(lines.len()).max(1);
     let first = picker.selection().saturating_sub(room - 1);
-    let active_id = picker
-        .active_theme
-        .as_deref()
-        .unwrap_or("base16-ocean.dark");
+    let active_id = picker.active_theme.as_deref().unwrap_or("Dark Modern");
 
     for (offset, &idx) in picker.matches().iter().enumerate().skip(first).take(room) {
         let item = &picker.items()[idx];
@@ -417,8 +448,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn curated_themes_has_all_five_items() {
-        assert_eq!(CURATED_THEMES.len(), 5);
+    fn curated_themes_has_all_six_items() {
+        assert_eq!(CURATED_THEMES.len(), 6);
+        assert!(CURATED_THEMES.iter().any(|t| t.id == "Dark Modern"));
         assert!(CURATED_THEMES.iter().any(|t| t.id == "Monokai"));
         assert!(CURATED_THEMES.iter().any(|t| t.id == "High Contrast"));
         assert!(CURATED_THEMES.iter().any(|t| t.id == "Solarized (dark)"));
@@ -427,7 +459,7 @@ mod tests {
     #[test]
     fn typing_filters_themes() {
         let mut picker = ThemePicker::new(None);
-        assert_eq!(picker.matches().len(), 5);
+        assert_eq!(picker.matches().len(), 6);
 
         for c in "mono".chars() {
             picker.insert(c);
@@ -439,7 +471,7 @@ mod tests {
         picker.backspace();
         picker.backspace();
         picker.backspace();
-        assert_eq!(picker.matches().len(), 5);
+        assert_eq!(picker.matches().len(), 6);
 
         for c in "high".chars() {
             picker.insert(c);
@@ -452,9 +484,11 @@ mod tests {
     #[test]
     fn navigation_and_selection() {
         let mut picker = ThemePicker::new(Some("Solarized (dark)"));
-        // Starts on Solarized Dark
-        assert_eq!(picker.selection(), 1);
+        // Starts on Solarized Dark (index 2: Dark Modern = 0, Ocean Dark = 1, Solarized Dark = 2)
+        assert_eq!(picker.selection(), 2);
 
+        picker.up();
+        assert_eq!(picker.selection(), 1);
         picker.up();
         assert_eq!(picker.selection(), 0);
         picker.up(); // Clamps at top
@@ -470,12 +504,13 @@ mod tests {
     fn theme_lines_renders_header_and_items() {
         let picker = ThemePicker::new(Some("Monokai"));
         let lines = theme_lines(&picker, 10);
-        assert!(lines[0].to_string().contains("select theme:  (5/5)"));
+        assert!(lines[0].to_string().contains("select theme:  (6/6)"));
         assert!(
             lines
                 .iter()
                 .any(|l| l.to_string().contains("Monokai (active)"))
         );
+        assert!(lines.iter().any(|l| l.to_string().contains("Dark Modern")));
         assert!(
             lines
                 .iter()
@@ -485,6 +520,14 @@ mod tests {
 
     #[test]
     fn theme_colors_resolve_curated_palettes() {
+        let dark_modern = ThemeColors::for_theme(Some("Dark Modern"));
+        assert_eq!(dark_modern, ThemeColors::DARK_MODERN);
+        assert_eq!(dark_modern.bg, Color::Rgb(31, 31, 31));
+        assert_eq!(dark_modern.fg, Color::Rgb(204, 204, 204));
+        assert_eq!(dark_modern.line_highlight, Color::Rgb(42, 45, 46));
+        assert_eq!(dark_modern.selection_bg, Color::Rgb(38, 79, 120));
+        assert!(dark_modern.is_dark);
+
         let ocean = ThemeColors::for_theme(Some("base16-ocean.dark"));
         assert_eq!(ocean, ThemeColors::OCEAN_DARK);
         assert!(ocean.is_dark);
@@ -518,10 +561,10 @@ mod tests {
         assert!(hc.is_dark);
 
         // Fallback
-        assert_eq!(ThemeColors::for_theme(None), ThemeColors::OCEAN_DARK);
+        assert_eq!(ThemeColors::for_theme(None), ThemeColors::DARK_MODERN);
         assert_eq!(
             ThemeColors::for_theme(Some("unknown")),
-            ThemeColors::OCEAN_DARK
+            ThemeColors::DARK_MODERN
         );
     }
 }

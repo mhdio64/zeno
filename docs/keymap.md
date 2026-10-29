@@ -267,7 +267,7 @@ relative_line_numbers = false
 tab_width = 4              # one indent level, 1–16
 auto_pair = true           # (", [", {", " and ' complete themselves
 autosave = false           # write the file after a moment of quiet
-theme = "base16-ocean.dark" # theme name or filename from themes/
+theme = "Dark Modern"        # theme name or filename from themes/
 
 [keys]
 leader = "ctrl+space"      # what opens a sequence
