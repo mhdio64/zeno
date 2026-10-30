@@ -10,3 +10,16 @@ __pycache__/
 
 # Freebuff Desktop project marker
 /.freebuff/
+
+# AI tooling and knowledge graph
+/.agents/
+/graphify-out/
+/.gitattributes
+
+# AI agent documentation and plans
+/HANDOFF.md
+/docs/superpowers/
+
+# Scratch & temporary development files
+/test.py
+
