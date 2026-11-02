@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use memmap2::Mmap;
+use memmap2::{Mmap, MmapMut};
 
 use edit::{Edit, History, Pos};
 
@@ -161,36 +161,7 @@ pub fn identity_of(path: &Path) -> std::io::Result<FileIdentity> {
 impl Doc {
     /// Creates an empty document with no backing file on disk.
     pub fn empty() -> std::io::Result<Self> {
-        let mut attempts = 0;
-        let file = loop {
-            attempts += 1;
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0);
-            let path = std::env::temp_dir().join(format!(
-                "zeno-empty-{}-{}-{}.tmp",
-                std::process::id(),
-                now,
-                attempts
-            ));
-            match std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(file) => {
-                    let _ = std::fs::remove_file(&path);
-                    break file;
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 10 => {
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        };
-        let mmap = Arc::new(unsafe { Mmap::map(&file)? });
+        let mmap = Arc::new(MmapMut::map_anon(0)?.make_read_only()?);
         Ok(Self {
             index: Arc::new(LineIndex::new(0)),
             overlay: Overlay::new(),

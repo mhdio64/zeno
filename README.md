@@ -55,6 +55,27 @@ cargo install --git https://github.com/mhdio64/zeno
 ### Manual Download
 Download the pre-compiled binary archive for your OS and architecture from the [GitHub Releases](https://github.com/mhdio64/zeno/releases/latest) page, extract it, and place `zeno` in your `PATH`.
 
+### 🔄 Updating zeno
+To update `zeno` to the newest release, simply re-run the installer for your platform:
+
+- **Linux & macOS:**
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/mhdio64/zeno/main/install.sh | bash
+  ```
+  *(Or with `sudo bash` if installed system-wide)*
+
+- **Windows (PowerShell):**
+  ```powershell
+  irm https://raw.githubusercontent.com/mhdio64/zeno/main/install.ps1 | iex
+  ```
+
+- **Via Cargo:**
+  ```bash
+  cargo install --git https://github.com/mhdio64/zeno --force
+  ```
+
+The installer automatically detects the existing install directory, replaces the binary with the latest release, and leaves your configuration file (`zeno.toml`) untouched.
+
 ---
 
 ## 🎯 Quick Start
@@ -145,7 +166,7 @@ zeno automatically loads configuration from `~/.config/zeno/zeno.toml` (or `%APP
 Example configuration:
 ```toml
 [settings]
-theme = "VS Code Dark Modern"
+theme = "Dark Modern"  # default: "Dark Modern" (built-in themes: Dark Modern, Monokai, base16-ocean.dark, Solarized (dark), Solarized (light), High Contrast)
 tab_size = 4
 use_spaces = true
 wrap = true

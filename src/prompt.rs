@@ -26,6 +26,7 @@ pub enum Purpose {
     ReplaceWith,
     ChangedOnDisk,
     SaveAs,
+    ConfirmOverwrite,
 }
 
 impl Purpose {
@@ -38,6 +39,7 @@ impl Purpose {
             Purpose::ReplaceWith => "With: ",
             Purpose::ChangedOnDisk => "Changed on disk",
             Purpose::SaveAs => "Save as: ",
+            Purpose::ConfirmOverwrite => "File exists — overwrite? ",
         }
     }
 }

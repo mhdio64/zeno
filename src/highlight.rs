@@ -1071,7 +1071,7 @@ fn load_themes_from(dir: Option<&Path>) -> (ThemeSet, Vec<String>) {
 /// When an explicit theme is requested (from configuration), it is looked up
 /// by exact key and then case-insensitively. If not found or not specified,
 /// any theme from the user's directory is chosen first; otherwise it falls
-/// back to the default dark theme (`base16-ocean.dark`).
+/// back to the default dark theme (`Dark Modern`).
 fn resolve_theme<'a>(
     themes: &'a ThemeSet,
     user_themes: &[String],

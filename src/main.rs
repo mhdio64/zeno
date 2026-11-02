@@ -337,6 +337,41 @@ fn run(path: &Path, background_index: bool, force: bool) -> Result<(), String> {
     editor.run()
 }
 
+/// An RAII guard that deletes a temporary file when it drops.
+struct TempFileGuard<'a>(&'a Path);
+
+impl Drop for TempFileGuard<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
+}
+
+/// Creates a file strictly accessible only by the current user (mode 0600 on Unix).
+fn create_private_file(path: &Path) -> io::Result<fs::File> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+/// Writes data to a file strictly accessible only by the current user (mode 0600 on Unix).
+fn write_private_file(path: &Path, data: &[u8]) -> io::Result<()> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(data)?;
+    file.flush()
+}
+
 /// `zeno -`: read a document from stdin, edit it, write it back to stdout.
 ///
 /// The editor works on a real file — the whole model is built on mapping one
@@ -344,11 +379,8 @@ fn run(path: &Path, background_index: bool, force: bool) -> Result<(), String> {
 /// what the editor holds at the end, not what came in: an edit that was saved
 /// and one that was not both leave the buffer as the answer (spec §4.1).
 ///
-/// A pipe cannot also carry keystrokes, so when stdin is not a terminal the
-/// editing session runs in a child process whose standard input and output
-/// are the terminal itself; the parent waits and prints the buffer the child
-/// left for it. When stdin already is the terminal it is edited here, and
-/// there is nothing to re-open.
+/// Spool files are protected by `TempFileGuard`, and permissions are strictly
+/// locked to `0600` on Unix to prevent local information leaks.
 fn run_stdin(force: bool) -> Result<(), String> {
     use std::io::IsTerminal;
 
@@ -363,10 +395,8 @@ fn run_stdin(force: bool) -> Result<(), String> {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     let spool = directory.join(format!("zeno-stdin-{pid}-{now}.txt"));
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&spool)
+    let _spool_guard = TempFileGuard(&spool);
+    create_private_file(&spool)
         .and_then(|mut f| f.write_all(&buffer))
         .map_err(|e| format!("spooling stdin: {e}"))?;
 
@@ -374,13 +404,10 @@ fn run_stdin(force: bool) -> Result<(), String> {
         edit_spooled(&spool, force, None)
     } else {
         let result = directory.join(format!("zeno-stdin-{pid}-{now}.out"));
-        let _ = fs::remove_file(&result);
-        let res = edit_on_terminal(&spool, &result, force)
-            .and_then(|()| fs::read(&result).map_err(|e| format!("reading the buffer back: {e}")));
-        let _ = fs::remove_file(&result);
-        res
+        let _result_guard = TempFileGuard(&result);
+        edit_on_terminal(&spool, &result, force)
+            .and_then(|()| fs::read(&result).map_err(|e| format!("reading the buffer back: {e}")))
     };
-    let _ = fs::remove_file(&spool);
     let text = edited?;
 
     let mut out = io::stdout();
@@ -408,7 +435,8 @@ fn edit_spooled(path: &Path, force: bool, result: Option<&Path>) -> Result<Vec<u
     editor.run()?;
     let text = editor.text();
     if let Some(result) = result {
-        fs::write(result, &text).map_err(|e| format!("writing the buffer back: {e}"))?;
+        write_private_file(result, text.as_bytes())
+            .map_err(|e| format!("writing the buffer back: {e}"))?;
     }
     Ok(text.into_bytes())
 }
@@ -533,6 +561,8 @@ struct Editor {
     /// The pattern a replace is about to look for, while it is asking what to
     /// put in its place.
     pending_replace: Option<Pattern>,
+    /// A target file path pending confirmation before overwriting in Save As.
+    pending_save_as: Option<PathBuf>,
     /// Whether an opening bracket or quote brings its partner with it.
     auto_pair: bool,
     /// The panel drawn over the viewport, if one is open.
@@ -611,6 +641,7 @@ impl Editor {
             highlight,
             marks: std::collections::HashMap::new(),
             pending_replace: None,
+            pending_save_as: None,
             auto_pair: true,
             overlay: None,
             pipe_out: false,
@@ -1195,6 +1226,7 @@ impl Editor {
         }
         if cancel {
             self.prompt = None;
+            self.pending_save_as = None;
             self.clear_search();
             self.message.clear();
             return;
@@ -1259,6 +1291,17 @@ impl Editor {
                         self.message = format!("unexpected choice: {c}");
                     }
                 },
+                Purpose::ConfirmOverwrite => match c {
+                    'y' | 'Y' => {
+                        if let Some(path) = self.pending_save_as.take() {
+                            self.save_as(&path);
+                        }
+                    }
+                    _ => {
+                        self.pending_save_as = None;
+                        self.message = "save cancelled".into();
+                    }
+                },
                 // A search, replacement or save-as is answered with text, never
                 // with a letter.
                 Purpose::Search | Purpose::Replace | Purpose::ReplaceWith | Purpose::SaveAs => {
@@ -1309,7 +1352,17 @@ impl Editor {
                         self.message = "no file name given".into();
                         return;
                     }
-                    self.save_as(Path::new(trimmed));
+                    let target = PathBuf::from(trimmed);
+                    if target.exists() {
+                        self.pending_save_as = Some(target);
+                        self.prompt = Some(Prompt::choice(
+                            Purpose::ConfirmOverwrite,
+                            &[('y', "Overwrite"), ('n', "Cancel")],
+                        ));
+                        self.message.clear();
+                        return;
+                    }
+                    self.save_as(&target);
                 }
                 _ => {
                     self.message = format!("unexpected text: {text}");
@@ -3776,6 +3829,10 @@ impl Editor {
 
         match Doc::open(target) {
             Ok(doc) => {
+                if doc.looks_binary(8192) {
+                    self.message = format!("refusing to open binary file: {}", target.display());
+                    return;
+                }
                 let _ = doc.spawn_indexer();
                 self.doc = doc;
                 self.path = target.to_path_buf();
@@ -4610,6 +4667,56 @@ mod tests {
         assert!(!e.dirty);
         assert_eq!(e.path, target_path);
         assert_eq!(std::fs::read(&target_path).unwrap(), b"hello\n");
+        let _ = std::fs::remove_file(&target_path);
+    }
+
+    #[test]
+    fn save_as_prompts_before_overwriting_existing_file() {
+        let (mut e, path) = editor_with("save-as-overwrite.txt", b"new content\n");
+        let target_path = path.parent().unwrap().join("existing-target.txt");
+        std::fs::write(&target_path, b"old content\n").unwrap();
+
+        // 1. Trigger Save As prompt
+        sequence(&mut e, "S");
+        assert_eq!(e.prompt.as_ref().unwrap().purpose(), Purpose::SaveAs);
+
+        while !prompt_text(&e).as_deref().unwrap_or("").is_empty() {
+            e.handle_key(key(KeyCode::Backspace));
+        }
+        type_into_prompt(&mut e, &target_path.to_string_lossy());
+        e.handle_key(key(KeyCode::Enter));
+
+        // Must ask for confirmation because file exists
+        assert!(e.prompt.is_some());
+        assert_eq!(
+            e.prompt.as_ref().unwrap().purpose(),
+            Purpose::ConfirmOverwrite
+        );
+
+        // Cancel with 'n'
+        e.handle_key(key(KeyCode::Char('n')));
+        assert!(e.prompt.is_none());
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"old content\n");
+        assert_eq!(e.message, "save cancelled");
+
+        // 2. Trigger again and confirm with 'y'
+        sequence(&mut e, "S");
+        while !prompt_text(&e).as_deref().unwrap_or("").is_empty() {
+            e.handle_key(key(KeyCode::Backspace));
+        }
+        type_into_prompt(&mut e, &target_path.to_string_lossy());
+        e.handle_key(key(KeyCode::Enter));
+
+        assert_eq!(
+            e.prompt.as_ref().unwrap().purpose(),
+            Purpose::ConfirmOverwrite
+        );
+        e.handle_key(key(KeyCode::Char('y')));
+
+        assert!(e.prompt.is_none());
+        assert_eq!(std::fs::read(&target_path).unwrap(), b"new content\n");
+        assert_eq!(e.path, target_path);
+
         let _ = std::fs::remove_file(&target_path);
     }
 
@@ -6498,6 +6605,27 @@ mod tests {
     }
 
     #[test]
+    fn switch_to_file_refuses_binary_file() {
+        let dir = std::env::temp_dir().join("zeno-switch-binary-tests");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let p_text = dir.join("plain.txt");
+        let p_bin = dir.join("image.png");
+        std::fs::write(&p_text, b"plain text\n").unwrap();
+        std::fs::write(&p_bin, b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR").unwrap();
+
+        let doc = Doc::open(&p_text).unwrap();
+        let mut e = Editor::new(doc, p_text.clone());
+
+        e.switch_to_file(&p_bin);
+
+        assert_eq!(e.path, p_text, "must not switch to binary file");
+        assert!(e.message.contains("refusing to open binary file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn open_finder_integrates_recents_at_top() {
         let dir = std::env::temp_dir().join("zeno-finder-recents-main-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -7355,5 +7483,42 @@ trim_trailing_whitespace = true
         let (mut e, _p) = editor_with("huge.txt", b"one\ntwo\n");
         e.view.cursor_line = u64::MAX - 1;
         let _line = e.status_line();
+    }
+
+    #[test]
+    fn private_files_have_restricted_permissions_on_unix() {
+        let temp_spool =
+            std::env::temp_dir().join(format!("zeno-priv-test-{}.tmp", std::process::id()));
+        let _guard = TempFileGuard(&temp_spool);
+        let _ = fs::remove_file(&temp_spool);
+
+        create_private_file(&temp_spool).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::metadata(&temp_spool).unwrap().permissions();
+            assert_eq!(
+                perms.mode() & 0o777,
+                0o600,
+                "private spool file must have mode 0600"
+            );
+        }
+
+        let temp_out =
+            std::env::temp_dir().join(format!("zeno-priv-out-{}.tmp", std::process::id()));
+        let _out_guard = TempFileGuard(&temp_out);
+        let _ = fs::remove_file(&temp_out);
+
+        write_private_file(&temp_out, b"secret").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = fs::metadata(&temp_out).unwrap().permissions();
+            assert_eq!(
+                perms.mode() & 0o777,
+                0o600,
+                "private output file must have mode 0600"
+            );
+        }
     }
 }

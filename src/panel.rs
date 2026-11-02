@@ -344,7 +344,17 @@ impl Palette {
 pub fn palette_lines(palette: &Palette, height: usize) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(vec![
         Span::styled("palette: ", heading()),
-        Span::styled(palette.query().to_owned(), body()),
+        Span::styled(
+            palette.query().to_owned(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("▌", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            format!(" ({}/{})", palette.matches().len(), ENTRIES.len()),
+            Style::default().fg(Color::DarkGray),
+        ),
     ])];
     if palette.matches().is_empty() {
         lines.push(Line::from(Span::styled(
@@ -359,27 +369,28 @@ pub fn palette_lines(palette: &Palette, height: usize) -> Vec<Line<'static>> {
     let first = palette.selection().saturating_sub(room - 1);
     for (offset, index) in palette.matches().iter().enumerate().skip(first).take(room) {
         let entry = &ENTRIES[*index];
-        let style = if offset == palette.selection() {
-            selected()
+        let is_selected = offset == palette.selection();
+        let indicator = if is_selected { "> " } else { "  " };
+        let style = if is_selected { selected() } else { body() };
+        let label_style = if is_selected {
+            style
         } else {
-            body()
+            Style::default()
+                .fg(Color::Rgb(230, 230, 230))
+                .add_modifier(Modifier::BOLD)
         };
+        let keys_st = if is_selected { style } else { keys_style() };
+
         lines.push(Line::from(vec![
-            Span::styled(
-                format!("  {:<18}", entry.keys),
-                if offset == palette.selection() {
-                    style
-                } else {
-                    keys_style()
-                },
-            ),
-            Span::styled(entry.label, style),
+            Span::styled(indicator, style),
+            Span::styled(format!("{:<34} ", entry.label), label_style),
+            Span::styled(format!("{:<26}", entry.keys), keys_st),
         ]));
     }
     let left = palette.matches().len().saturating_sub(first + room);
     if left > 0 {
         lines.push(Line::from(Span::styled(
-            format!("  … {left} more"),
+            format!("  … {left} more commands"),
             Style::default().fg(Color::DarkGray),
         )));
     }

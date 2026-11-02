@@ -343,14 +343,61 @@ pub fn update_theme_in_text(text: &str, theme_name: &str) -> String {
     result
 }
 
-/// Saves the chosen theme to a specific configuration file path.
+/// Saves the chosen theme to a specific configuration file path atomically.
 pub fn save_theme_to(path: &Path, theme_name: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    use std::io::Write;
+
+    let dir = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => {
+            std::fs::create_dir_all(parent)?;
+            parent
+        }
+        _ => Path::new("."),
+    };
+
     let current_text = std::fs::read_to_string(path).unwrap_or_default();
     let updated_text = update_theme_in_text(&current_text, theme_name);
-    std::fs::write(path, updated_text)
+
+    let existing_permissions = std::fs::metadata(path).ok().map(|m| m.permissions());
+
+    let mut attempts = 0;
+    let (mut file, tmp_path) = loop {
+        attempts += 1;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp_name = format!(".zeno-config-{}-{}-{attempts}.tmp", std::process::id(), now);
+        let candidate = dir.join(tmp_name);
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        match opts.open(&candidate) {
+            Ok(f) => break (f, candidate),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempts < 10 => continue,
+            Err(e) => return Err(e),
+        }
+    };
+
+    let res = (|| -> std::io::Result<()> {
+        file.write_all(updated_text.as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        if let Some(perms) = existing_permissions {
+            let _ = std::fs::set_permissions(&tmp_path, perms);
+        }
+        std::fs::rename(&tmp_path, path)?;
+        Ok(())
+    })();
+
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp_path);
+    }
+    res
 }
 
 /// Saves the chosen theme to the user's config file (`zeno.toml`), creating
