@@ -46,9 +46,9 @@ try {
 
     # Ensure $InstallDir is in User PATH
     $UserPath = [Environment]::GetEnvironmentVariable("Path", [EnvironmentVariableTarget]::User)
-    $Paths = $UserPath -split ";"
-    if ($Paths -notcontains $InstallDir) {
-        $NewPath = "$UserPath;$InstallDir"
+    $Paths = if ($UserPath) { $UserPath -split ";" | ForEach-Object { $_.TrimEnd("\") } } else { @() }
+    if ($Paths -notcontains $InstallDir.TrimEnd("\")) {
+        $NewPath = if ([string]::IsNullOrWhiteSpace($UserPath)) { $InstallDir } else { "$UserPath;$InstallDir" }
         [Environment]::SetEnvironmentVariable("Path", $NewPath, [EnvironmentVariableTarget]::User)
         $env:Path = "$env:Path;$InstallDir"
         Write-Host "Added $InstallDir to user PATH." -ForegroundColor Gray

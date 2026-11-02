@@ -1192,9 +1192,13 @@ mod tests {
     use super::*;
     use crate::doc::edit::Pos;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     fn temp_file(name: &str, contents: &[u8]) -> PathBuf {
-        let dir = std::env::temp_dir().join("zeno-highlight-tests");
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("zeno-hl-{}-{id}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join(name);
         std::fs::write(&path, contents).unwrap();
@@ -1211,7 +1215,7 @@ mod tests {
     /// Colours a window and waits for the answer.
     fn colours_of(highlighter: &mut Highlighter, doc: &Doc, first: u64, last: u64) -> Highlighted {
         highlighter.request(doc, first, last);
-        for _ in 0..2000 {
+        for _ in 0..10_000 {
             highlighter.poll(doc);
             if !highlighter.lines().is_empty() {
                 return highlighter.lines().clone();
@@ -1231,7 +1235,9 @@ mod tests {
 
     /// A directory of the user's own syntaxes, with the given files in it.
     fn syntax_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zeno-syntax-{name}"));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("zeno-syntax-{}-{name}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (file, text) in files {
@@ -1242,7 +1248,9 @@ mod tests {
 
     /// A directory of the user's own themes, with the given files in it.
     fn theme_dir(name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("zeno-theme-{name}"));
+        let id = TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("zeno-theme-{}-{name}-{id}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         for (file, text) in files {

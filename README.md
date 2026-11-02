@@ -34,6 +34,11 @@ Run this single command in your terminal:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mhdio64/zeno/main/install.sh | bash
 ```
+> [!TIP]
+> The installer automatically detects your environment, installs `zeno`, and ensures your shell `PATH` is configured (`~/.bashrc`, `~/.zshrc`, fish). For a system-wide install directly with root privileges, you can also run:
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/mhdio64/zeno/main/install.sh | sudo bash
+> ```
 
 ### Windows (PowerShell One-Line Install)
 Run this command in PowerShell:
