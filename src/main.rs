@@ -22,7 +22,7 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span, Text};
-use ratatui::widgets::{Paragraph, Widget};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Widget};
 
 use zeno_cli::clipboard;
 use zeno_cli::complete::{self, Completion};
@@ -3983,45 +3983,91 @@ impl Editor {
 
         terminal.draw(|f| {
             let theme_colors = self.highlight.theme_colors();
-            // A panel covers the document rather than sharing the screen with
-            // it: the list is the thing being read, so it gets the room.
-            let cursor = match &self.overlay {
-                Some(overlay) => {
-                    let lines = match overlay {
-                        Overlay::Help { offset } => {
-                            panel::help_lines(*offset, body.height as usize)
-                        }
-                        Overlay::Palette(palette) => {
-                            panel::palette_lines(palette, body.height as usize)
-                        }
-                        Overlay::Finder(finder) => {
-                            finder::finder_lines(finder, body.height as usize)
-                        }
-                        Overlay::Recent(picker) => {
-                            recent::recent_lines(picker, body.height as usize)
-                        }
-                        Overlay::Theme(picker) => theme::theme_lines(picker, body.height as usize),
-                    };
+
+            let view = View {
+                doc: &self.doc,
+                state: &self.view,
+                highlight: Some(self.highlight.lines()),
+                diff_signs: Some(&self.git.signs),
+                theme: theme_colors,
+            };
+            let cursor = if self.overlay.is_none() {
+                view.cursor_position(body)
+            } else {
+                None
+            };
+            f.render_widget(view, body);
+
+            if let Some(overlay) = &self.overlay {
+                let is_small = body.width < 44 || body.height < 10;
+                let (modal_rect, use_block) = if is_small {
+                    (body, false)
+                } else {
+                    let modal_width = (body.width.saturating_sub(4)).clamp(36, 74);
+                    let modal_height = (body.height.saturating_sub(4)).clamp(8, 18);
+                    let modal_x = body.x + (body.width.saturating_sub(modal_width)) / 2;
+                    let modal_y = body.y + (body.height.saturating_sub(modal_height)) / 4;
+                    (Rect::new(modal_x, modal_y, modal_width, modal_height), true)
+                };
+
+                let avail_height = if use_block {
+                    modal_rect.height.saturating_sub(2) as usize
+                } else {
+                    modal_rect.height as usize
+                };
+
+                let (title, lines) = match overlay {
+                    Overlay::Help { offset } => (
+                        " 📖 Help & Keybindings ",
+                        panel::help_lines(*offset, avail_height),
+                    ),
+                    Overlay::Palette(palette) => (
+                        " ⚡ Command Palette ",
+                        panel::palette_lines(palette, avail_height),
+                    ),
+                    Overlay::Finder(finder) => (
+                        " 🔍 File Finder ",
+                        finder::finder_lines(finder, avail_height),
+                    ),
+                    Overlay::Recent(picker) => (
+                        " 🕒 Recent Files ",
+                        recent::recent_lines(picker, avail_height),
+                    ),
+                    Overlay::Theme(picker) => (
+                        " 🎨 Select Theme ",
+                        theme::theme_lines(picker, avail_height),
+                    ),
+                };
+
+                f.render_widget(Clear, modal_rect);
+
+                if use_block {
+                    let border_style = Style::default().fg(if theme_colors.is_dark {
+                        Color::Rgb(80, 110, 150)
+                    } else {
+                        Color::Rgb(120, 150, 180)
+                    });
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(border_style)
+                        .title(title)
+                        .style(Style::default().bg(theme_colors.bg).fg(theme_colors.fg));
+                    let inner = block.inner(modal_rect);
+                    f.render_widget(block, modal_rect);
                     f.render_widget(
                         Paragraph::new(Text::from(lines))
                             .style(Style::default().bg(theme_colors.bg).fg(theme_colors.fg)),
-                        body,
+                        inner,
                     );
-                    None
+                } else {
+                    f.render_widget(
+                        Paragraph::new(Text::from(lines))
+                            .style(Style::default().bg(theme_colors.bg).fg(theme_colors.fg)),
+                        modal_rect,
+                    );
                 }
-                None => {
-                    let view = View {
-                        doc: &self.doc,
-                        state: &self.view,
-                        highlight: Some(self.highlight.lines()),
-                        diff_signs: Some(&self.git.signs),
-                        theme: theme_colors,
-                    };
-                    let cursor = view.cursor_position(body);
-                    f.render_widget(view, body);
-                    cursor
-                }
-            };
+            }
             match &self.prompt {
                 // The question replaces the status line, so the document area
                 // keeps its size and nothing on screen moves.
